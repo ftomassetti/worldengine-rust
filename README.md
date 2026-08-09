@@ -144,11 +144,46 @@ the suite unportable.
 ```sh
 wasm-pack build worldengine-wasm --target web --out-dir ../www/pkg --release
 python3 -m http.server 8000 -d www
+# then open http://localhost:8000
 ```
 
 Generation is exposed phase by phase rather than as one blocking call, so the
-world can be watched as it forms: the plate tectonics stage steps one iteration
-at a time, and each subsequent simulation is a separate `nextPhase()` call.
+world can be watched as it forms. Everything runs in a **Web Worker**, so the
+page stays responsive while the simulations run, and each finished phase posts
+its rendered RGBA buffer back as a transferable — the main thread only paints.
+
+Configurable: seed, dimensions, plate count, ocean level, gamma value and
+offset, the six temperature thresholds and seven humidity quantiles, and the
+fade-borders toggle. The panel on the right ticks off all fourteen phases with
+per-phase timings as they land, and lists the biome breakdown at the end.
+
+**Saving and loading.** "Save .world" writes the world in worldengine's own
+protobuf format and "Load .world…" reads one back and visualizes it, skipping
+generation entirely. These files interchange with the Python tool in both
+directions — verified: the Rust suite reads the Python's `seed_28070.world`
+fixture, and a file written from this demo opens in Python worldengine with all
+fourteen layers intact.
+
+Eleven views are available once generation completes — plates, elevation,
+shaded elevation, ocean, precipitation, temperature, biome, satellite, rivers,
+ice caps, the temperature/humidity scatter plot, and the hand-drawn ancient
+map — all rendered in Rust by the same code the blessed-image tests pin.
+
+### A note on speed
+
+Nearly all the wall-clock time is the plate tectonics stage, and its cost grows
+sharply with area: 256×128 finishes in about two seconds, 512×256 takes around
+twenty. Everything after it — the ten simulations that make up the rest of the
+pipeline — runs in well under a second even at 512×256.
+
+Every other view renders in well under a second; the ancient map — the most
+expensive — takes about 55 ms at 512×256 and 370 ms at 1024×512.
+
+Measured on this machine, the plate simulation runs at about 16 ms/step in the
+browser against 2 ms/step natively. That gap is inherent to the workload rather
+than a build problem: the `platec` wasm build shows the same figure. Note also
+that per-step cost *falls* through a run as plates merge and are removed, so a
+late-run sample is not representative of the average.
 
 ## License
 

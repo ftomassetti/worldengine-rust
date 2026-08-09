@@ -1,0 +1,346 @@
+// Main-thread UI for the worldengine demo. All generation happens in
+// worker.js; this file only collects parameters and paints the frames it
+// sends back.
+
+const $ = (id) => document.getElementById(id);
+
+const els = {
+  seed: $('seed'), width: $('width'), height: $('height'), numPlates: $('numPlates'),
+  oceanLevel: $('oceanLevel'), gammaCurve: $('gammaCurve'), curveOffset: $('curveOffset'),
+  fadeBorders: $('fadeBorders'), temps: $('temps'), humids: $('humids'),
+  generate: $('generate'), randomSeed: $('randomSeed'),
+  save: $('save'), load: $('load'), loadInput: $('loadInput'),
+  view: $('view'), canvas: $('canvas'), status: $('status'),
+  phases: $('phases'), biomes: $('biomes'),
+  statPlateIter: $('statPlateIter'), statPlates: $('statPlates'),
+  statOcean: $('statOcean'), statTotal: $('statTotal'),
+};
+
+const ctx = els.canvas.getContext('2d');
+
+// These mirror the `Phase` and `View` enums in worldengine-wasm/src/lib.rs.
+// Keeping the tables here avoids loading the wasm module twice (the worker
+// already has it).
+const PHASES = [
+  'Plate tectonics', 'Centre land', 'Elevation noise', 'Fade borders',
+  'Oceans and thresholds', 'Temperature', 'Precipitation', 'Erosion and rivers',
+  'Watermap', 'Irrigation', 'Humidity', 'Permeability', 'Biomes', 'Ice caps',
+];
+
+const VIEWS = [
+  { id: 0, name: 'Plates' },
+  { id: 1, name: 'Elevation' },
+  { id: 2, name: 'Elevation (shaded)' },
+  { id: 3, name: 'Ocean' },
+  { id: 4, name: 'Precipitation' },
+  { id: 5, name: 'Temperature' },
+  { id: 6, name: 'Biome' },
+  { id: 7, name: 'Satellite' },
+  { id: 8, name: 'Rivers' },
+  { id: 9, name: 'Ice caps' },
+  { id: 10, name: 'Scatter plot' },
+  { id: 11, name: 'Ancient map' },
+];
+
+let worker = null;
+let running = false;
+let totalMs = 0;
+/// The view the user picked, or null while the preview follows the phases.
+let pinnedView = null;
+/// Set once a world has been loaded from disk rather than generated.
+let loadedFromFile = false;
+
+// --- UI helpers -----------------------------------------------------------
+
+function setStatus(text, isError = false) {
+  els.status.textContent = text;
+  els.status.classList.toggle('error', isError);
+}
+
+function buildPhaseList() {
+  els.phases.innerHTML = '';
+  PHASES.forEach((name, i) => {
+    const li = document.createElement('li');
+    li.id = `phase-${i}`;
+    const label = document.createElement('span');
+    label.textContent = name;
+    const time = document.createElement('span');
+    time.className = 't';
+    time.textContent = '';
+    li.append(label, time);
+    els.phases.appendChild(li);
+  });
+}
+
+function markPhase(index, state, ms) {
+  const li = $(`phase-${index}`);
+  if (!li) return;
+  li.classList.remove('active', 'done');
+  if (state) li.classList.add(state);
+  if (ms !== undefined) {
+    li.querySelector('.t').textContent = ms < 1000 ? `${ms.toFixed(0)} ms` : `${(ms / 1000).toFixed(1)} s`;
+  }
+}
+
+function buildViewList() {
+  els.view.innerHTML = '';
+  for (const v of VIEWS) {
+    const opt = document.createElement('option');
+    opt.value = String(v.id);
+    opt.textContent = v.name;
+    els.view.appendChild(opt);
+  }
+  els.view.value = '7'; // Satellite, once it is available.
+}
+
+function paint(frame) {
+  const { width, height, buffer } = frame;
+  if (els.canvas.width !== width || els.canvas.height !== height) {
+    els.canvas.width = width;
+    els.canvas.height = height;
+  }
+  const image = new ImageData(new Uint8ClampedArray(buffer), width, height);
+  ctx.putImageData(image, 0, 0);
+}
+
+/// Render the `name\tcount` lines the worker sends, largest first.
+function renderBiomeCounts(text) {
+  const rows = text
+    .split('\n')
+    .filter(Boolean)
+    .map((line) => {
+      const [name, count] = line.split('\t');
+      return { name, count: Number(count) };
+    })
+    .sort((a, b) => b.count - a.count);
+
+  els.biomes.innerHTML = '';
+  for (const row of rows) {
+    const li = document.createElement('li');
+    const n = document.createElement('span');
+    n.className = 'n';
+    n.textContent = row.name;
+    n.title = row.name;
+    const c = document.createElement('span');
+    c.className = 'c';
+    c.textContent = row.count.toLocaleString();
+    li.append(n, c);
+    els.biomes.appendChild(li);
+  }
+}
+
+function parseList(text, expected, label) {
+  const values = text.split(',').map((v) => Number(v.trim()));
+  if (values.length !== expected || values.some((v) => Number.isNaN(v))) {
+    throw new Error(`${label} needs ${expected} comma-separated numbers`);
+  }
+  return values;
+}
+
+function setBusy(busy) {
+  running = busy;
+  els.generate.disabled = busy;
+  els.generate.textContent = busy ? 'Generating…' : 'Generate world';
+}
+
+// --- Worker plumbing ------------------------------------------------------
+
+function startWorker() {
+  worker = new Worker('./worker.js', { type: 'module' });
+
+  worker.onmessage = (event) => {
+    const msg = event.data;
+    switch (msg.type) {
+      case 'ready':
+        els.generate.disabled = false;
+        setStatus('Ready. Adjust the parameters and press "Generate world".');
+        generate();
+        break;
+
+      case 'plates':
+        markPhase(0, 'active');
+        els.statPlateIter.textContent = msg.iteration;
+        els.statPlates.textContent = msg.plateCount;
+        // This phase dominates the run, so keep it visibly alive.
+        setStatus(
+          `Simulating plate tectonics — iteration ${msg.iteration}, ${msg.plateCount} plates remaining…`,
+        );
+        break;
+
+      case 'phase': {
+        totalMs += msg.elapsed;
+        markPhase(msg.phase, 'done', msg.elapsed);
+        if (msg.phase + 1 < PHASES.length) markPhase(msg.phase + 1, 'active');
+        els.statTotal.textContent = `${(totalMs / 1000).toFixed(1)} s`;
+        setStatus(`${msg.name} complete…`);
+        if (msg.buffer && pinnedView === null) paint(msg);
+        break;
+      }
+
+      case 'complete':
+        setBusy(false);
+        els.view.disabled = false;
+        els.save.disabled = false;
+        els.statOcean.textContent = `${(msg.oceanFraction * 100).toFixed(0)}%`;
+        renderBiomeCounts(msg.biomeCounts);
+        setStatus(`World complete in ${(totalMs / 1000).toFixed(1)} s. Pick a view to explore it.`);
+        // Show the view the selector is on.
+        requestView(Number(els.view.value));
+        break;
+
+      case 'saved': {
+        // Hand the bytes straight to the browser as a download.
+        const blob = new Blob([msg.bytes], { type: 'application/octet-stream' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `${msg.name}.world`;
+        a.click();
+        URL.revokeObjectURL(url);
+        const mb = (msg.bytes.byteLength / (1024 * 1024)).toFixed(1);
+        setStatus(`Saved ${msg.name}.world (${mb} MB).`);
+        break;
+      }
+
+      case 'loaded': {
+        setBusy(false);
+        loadedFromFile = true;
+        // A loaded world is finished by definition, but only carries the
+        // layers whoever saved it chose to include.
+        buildPhaseList();
+        PHASES.forEach((_, i) => markPhase(i, 'done'));
+        els.width.value = msg.width;
+        els.height.value = msg.height;
+        els.statOcean.textContent = `${(msg.oceanFraction * 100).toFixed(0)}%`;
+        els.statTotal.textContent = '–';
+        els.statPlateIter.textContent = '–';
+        els.statPlates.textContent = '–';
+        renderBiomeCounts(msg.biomeCounts);
+        markViewsAvailable(msg.available);
+        els.view.disabled = false;
+        els.save.disabled = false;
+        setStatus(`Loaded ${msg.name} (${msg.width}×${msg.height}).`);
+        const first = msg.available.includes(7) ? 7 : (msg.available[0] ?? 1);
+        els.view.value = String(first);
+        pinnedView = first;
+        requestView(first);
+        break;
+      }
+
+      case 'render':
+        paint(msg);
+        setStatus(`Showing ${VIEWS.find((v) => v.id === msg.view)?.name ?? 'map'}.`);
+        break;
+
+      case 'unavailable':
+        setStatus(
+          `${VIEWS.find((v) => v.id === msg.view)?.name ?? 'That view'} is not available yet — it needs a later phase.`,
+        );
+        break;
+
+      case 'error':
+        setBusy(false);
+        setStatus(`Generation failed: ${msg.message}`, true);
+        break;
+
+      default:
+        break;
+    }
+  };
+
+  worker.onerror = (e) => {
+    setBusy(false);
+    setStatus(`Worker error: ${e.message}`, true);
+  };
+}
+
+function requestView(view) {
+  worker.postMessage({ type: 'render', view });
+}
+
+/// Grey out the views a loaded world has no layers for.
+function markViewsAvailable(available) {
+  const set = new Set(available);
+  for (const opt of els.view.options) {
+    const ok = set.has(Number(opt.value));
+    opt.disabled = !ok;
+    opt.textContent = ok
+      ? VIEWS.find((v) => v.id === Number(opt.value)).name
+      : `${VIEWS.find((v) => v.id === Number(opt.value)).name} (not in file)`;
+  }
+}
+
+function generate() {
+  if (running) return;
+
+  let params;
+  try {
+    params = {
+      seed: Number(els.seed.value) >>> 0,
+      width: Math.max(5, Number(els.width.value) | 0),
+      height: Math.max(5, Number(els.height.value) | 0),
+      numPlates: Math.max(1, Number(els.numPlates.value) | 0),
+      oceanLevel: Number(els.oceanLevel.value),
+      gammaCurve: Number(els.gammaCurve.value),
+      curveOffset: Number(els.curveOffset.value),
+      fadeBorders: els.fadeBorders.checked,
+      temps: parseList(els.temps.value, 6, 'Temperature thresholds'),
+      humids: parseList(els.humids.value, 7, 'Humidity quantiles'),
+    };
+  } catch (e) {
+    setStatus(e.message, true);
+    return;
+  }
+
+  totalMs = 0;
+  pinnedView = null;
+  loadedFromFile = false;
+  els.save.disabled = true;
+  buildViewList();
+  buildPhaseList();
+  markPhase(0, 'active');
+  els.biomes.textContent = '–';
+  els.statOcean.textContent = '–';
+  els.statTotal.textContent = '–';
+  els.view.disabled = true;
+  setBusy(true);
+  setStatus('Simulating plate tectonics…');
+
+  ctx.clearRect(0, 0, els.canvas.width, els.canvas.height);
+  worker.postMessage({ type: 'generate', params });
+}
+
+// --- Wiring ---------------------------------------------------------------
+
+els.generate.addEventListener('click', generate);
+
+els.save.addEventListener('click', () => {
+  setStatus('Serializing…');
+  worker.postMessage({ type: 'save' });
+});
+
+els.load.addEventListener('click', () => els.loadInput.click());
+
+els.loadInput.addEventListener('change', async () => {
+  const file = els.loadInput.files?.[0];
+  if (!file) return;
+  els.loadInput.value = ''; // Allow re-loading the same file.
+  setBusy(true);
+  setStatus(`Loading ${file.name}…`);
+  const bytes = await file.arrayBuffer();
+  worker.postMessage(
+    { type: 'load', bytes, views: VIEWS.map((v) => v.id) },
+    [bytes],
+  );
+});
+els.randomSeed.addEventListener('click', () => {
+  els.seed.value = Math.floor(Math.random() * 2 ** 31);
+});
+els.view.addEventListener('change', () => {
+  pinnedView = Number(els.view.value);
+  requestView(pinnedView);
+});
+
+buildPhaseList();
+buildViewList();
+startWorker();

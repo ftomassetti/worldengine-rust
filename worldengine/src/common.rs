@@ -74,12 +74,17 @@ fn convolve_same(a: &[f64], kernel: &[f64]) -> Vec<f64> {
     let mut out = Vec::with_capacity(n as usize);
     for i in start..start + n {
         let mut acc = 0.0;
-        // full[i] = sum_j a[j] * kernel[i - j]
-        for j in 0..n {
-            let idx = i - j;
-            if idx >= 0 && idx < k {
-                acc += a[j as usize] * kernel[idx as usize];
-            }
+        // full[i] = sum_j a[j] * kernel[i - j], over the j for which the kernel
+        // index stays in range: j in [i - k + 1, i], clamped to [0, n).
+        //
+        // Visiting only that window rather than scanning the whole row is what
+        // makes this O(n·k) instead of O(n²) — at a 2048-wide map the latter
+        // made the ancient map take minutes. The terms and their order (j
+        // ascending) are unchanged, so results stay bit-identical.
+        let j_lo = (i - k + 1).max(0);
+        let j_hi = i.min(n - 1);
+        for j in j_lo..=j_hi {
+            acc += a[j as usize] * kernel[(i - j) as usize];
         }
         out.push(acc);
     }

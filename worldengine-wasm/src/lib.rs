@@ -14,6 +14,7 @@ use worldengine::generation::{
 };
 use worldengine::matrix::Matrix;
 use worldengine::numpy::NumpyRng;
+use worldengine::serialization::protobuf;
 use worldengine::simulations;
 use worldengine::step::Step;
 use worldengine::world::{GenerationParameters, LayerWithThresholds, World};
@@ -165,7 +166,7 @@ impl WorldGenerator {
         .map_err(|e| JsError::new(&e.to_string()))?;
 
         let world = World::new(
-            "world",
+            format!("seed_{seed}"),
             width,
             height,
             seed,
@@ -189,6 +190,54 @@ impl WorldGenerator {
             fade_borders,
             step: Step::Full,
         })
+    }
+
+    /// Rebuild a generator from a saved `.world` file.
+    ///
+    /// The format is worldengine's own protobuf, so files written here load in
+    /// the Python tool and vice versa. The result is already in the `Done`
+    /// phase: every view the file carries layers for can be rendered.
+    #[wasm_bindgen(js_name = fromProtobuf)]
+    pub fn from_protobuf(bytes: &[u8]) -> Result<WorldGenerator, JsError> {
+        let world = protobuf::unserialize(bytes).map_err(|e| JsError::new(&e.to_string()))?;
+        let seed = world.seed;
+        Ok(WorldGenerator {
+            rng: NumpyRng::new(seed),
+            seeds: seed_dict(seed),
+            step: world.generation_params.step,
+            world,
+            plates: None,
+            phase: Phase::Done,
+            fade_borders: true,
+        })
+    }
+
+    /// Whether there is enough of a world to write a `.world` file. The
+    /// elevation thresholds the format requires only exist once the
+    /// `OceanAndThresholds` phase has run.
+    #[wasm_bindgen(js_name = canSerialize)]
+    pub fn can_serialize(&self) -> bool {
+        self.world
+            .elevation
+            .as_ref()
+            .is_some_and(|e| e.thresholds.len() >= 3)
+            && self.world.has_ocean()
+            && self.world.sea_depth.is_some()
+    }
+
+    /// Serialize to worldengine's protobuf `.world` format.
+    pub fn serialize(&self) -> Result<Vec<u8>, JsError> {
+        if !self.can_serialize() {
+            return Err(JsError::new(
+                "the world is not far enough along to save (needs the ocean and thresholds phase)",
+            ));
+        }
+        Ok(protobuf::serialize(&self.world))
+    }
+
+    /// The world's name, used for the download filename.
+    pub fn name(&self) -> String {
+        self.world.name.clone()
     }
 
     pub fn width(&self) -> usize {
