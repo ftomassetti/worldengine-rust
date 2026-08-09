@@ -1,0 +1,15 @@
+[package]
+name = "worldengine-wasm"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+worldengine = { path = "../worldengine", default-features = false }
+platec = { path = "../../plate-tectonics-rust/platec" }
+wasm-bindgen = "0.2"
+js-sys = "0.3"
+console_error_panic_hook = "0.1"

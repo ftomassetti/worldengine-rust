@@ -1,0 +1,17 @@
+[package]
+name = "worldengine"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "World generator simulating plate tectonics, erosion and biomes — a Rust port of worldengine"
+
+[dependencies]
+platec = { path = "../../plate-tectonics-rust/platec" }
+png = { version = "0.17", optional = true }
+
+[dev-dependencies]
+png = "0.17"
+
+[features]
+default = ["png-io"]
+png-io = ["dep:png"]
