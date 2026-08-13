@@ -131,6 +131,30 @@ fn river_sources(
     let mut river_source_list: Vec<[i64; 2]> = Vec::new();
     let precipitation = &world.precipitation_layer().data;
 
+    // Sources are kept in a coarse grid as well as a list. The spacing rule
+    // rejects a candidate within 9 cells of an existing source, and testing
+    // that by scanning every source found so far is quadratic — which only
+    // showed once sources became plentiful. A source can only be within 9 cells
+    // of a candidate if it sits in the same grid cell or one adjacent, so
+    // buckets of side 9 turn the scan into nine short lookups.
+    // A source rises in the uplands. `is_mountain` is "above the mountain
+    // line" and `is_hill` is "between the hill and mountain lines", so their
+    // union is simply "above the hill line" — one comparison against a value
+    // hoisted out of the walk, rather than two calls that re-derive the
+    // thresholds and re-borrow the layers for every cell of every path.
+    let hill_level = {
+        let layer = world.elevation_layer();
+        let hi = if layer.thresholds.len() == 4 { 1 } else { 0 };
+        layer.th(hi)
+    };
+    let elevation = &world.elevation_layer().data;
+    let ocean = world.ocean_data();
+
+    const SEED_GRID: usize = 9;
+    let gw = world.width.div_ceil(SEED_GRID);
+    let gh = world.height.div_ceil(SEED_GRID);
+    let mut seed_grid: Vec<Vec<[i64; 2]>> = vec![Vec::new(); gw * gh];
+
     for y in 0..world.height.saturating_sub(1) {
         for x in 0..world.width.saturating_sub(1) {
             let rain_fall = precipitation[(y, x)];
@@ -143,17 +167,34 @@ fn river_sources(
             let mut neighbour_seed_found = false;
             // Follow the flow path to wherever it leads.
             while !neighbour_seed_found {
-                if world.is_mountain((cx, cy)) && water_flow[(cy, cx)] >= RIVER_TH {
+                // Sources rise anywhere in the uplands, not only on the
+                // mountains. Requiring a mountain restricted every river on the
+                // world to the top 3% of land by elevation, so ranges were laced
+                // with rivers and everything else — every hill catchment, every
+                // plain — had none at all. The hill line is the top 10%, which
+                // still puts sources in high ground while giving the rest of the
+                // world its drainage.
+                if !ocean[(cy, cx)]
+                    && elevation[(cy, cx)] > hill_level
+                    && water_flow[(cy, cx)] >= RIVER_TH
+                {
                     // Try not to create seeds around other seeds.
-                    for seed in &river_source_list {
-                        if in_circle(9, cx as i64, cy as i64, seed[0], seed[1]) {
-                            neighbour_seed_found = true;
+                    let (bx, by) = (cx / SEED_GRID, cy / SEED_GRID);
+                    'grid: for gy in by.saturating_sub(1)..=(by + 1).min(gh - 1) {
+                        for gx in bx.saturating_sub(1)..=(bx + 1).min(gw - 1) {
+                            for seed in &seed_grid[gy * gw + gx] {
+                                if in_circle(9, cx as i64, cy as i64, seed[0], seed[1]) {
+                                    neighbour_seed_found = true;
+                                    break 'grid;
+                                }
+                            }
                         }
                     }
                     if neighbour_seed_found {
                         break;
                     }
                     river_source_list.push([cx as i64, cy as i64]);
+                    seed_grid[by * gw + bx].push([cx as i64, cy as i64]);
                     break;
                 }
 

@@ -54,7 +54,7 @@ impl Counter {
 fn convolve_valid_into(a: &[f64], kernel: &[f64], out: &mut [f64]) {
     let k = kernel.len();
     let n = a.len();
-    debug_assert!(n >= k && out.len() >= n - k + 1);
+    debug_assert!(n >= k && out.len() > n - k);
     for i in 0..=(n - k) {
         let mut acc = 0.0;
         for (j, kv) in kernel.iter().enumerate() {

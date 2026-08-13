@@ -127,7 +127,7 @@ pub fn fill_ocean(elevation: &Matrix<f64>, sea_level: f64) -> Matrix<bool> {
     // entries on a large world. The order in which cells are first queued, and
     // so the set that ends up flooded, is unchanged.
     let mut to_expand: Vec<u32> = Vec::new();
-    let mut push = |ocean: &mut Matrix<bool>, q: &mut Vec<u32>, x: usize, y: usize| {
+    let push = |ocean: &mut Matrix<bool>, q: &mut Vec<u32>, x: usize, y: usize| {
         if !ocean[(y, x)] && elevation[(y, x)] <= sea_level {
             ocean[(y, x)] = true;
             q.push((y * width + x) as u32);

@@ -12,13 +12,13 @@ fn main() {
     let world = world_gen("bench", w, h, 28070, &params, &mut rng);
     println!("world ready");
 
-    for _ in 0..4 {
+    for _ in 0..12 {
         let mut a = world.clone();
         let t = Instant::now();
         initialize_ocean_and_thresholds(&mut a, 1.0);
         println!("oceans+thresholds: {:.2}s", t.elapsed().as_secs_f64());
     }
-    for _ in 0..4 {
+    for _ in 0..12 {
         let mut b = world.clone();
         let t = Instant::now();
         erosion::execute(&mut b, 28070);
