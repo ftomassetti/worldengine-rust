@@ -182,6 +182,227 @@ fn draw_a_mountain(target: &mut RgbaImage, x: i64, y: i64, w: f64, h: i64) {
     }
 }
 
+/// Draw a straight line of ink, Bresenham.
+fn stroke(target: &mut RgbaImage, x0: i64, y0: i64, x1: i64, y1: i64, c: [u8; 4]) {
+    let (dx, dy) = ((x1 - x0).abs(), -(y1 - y0).abs());
+    let (sx, sy) = (if x0 < x1 { 1 } else { -1 }, if y0 < y1 { 1 } else { -1 });
+    let (mut x, mut y, mut err) = (x0, y0, dx + dy);
+    loop {
+        if x >= 0 && y >= 0 && x < target.width() as i64 && y < target.height() as i64 {
+            target.set_pixel(x as usize, y as usize, c);
+        }
+        if x == x1 && y == y1 {
+            break;
+        }
+        let e2 = 2 * err;
+        if e2 >= dy {
+            err += dy;
+            x += sx;
+        }
+        if e2 <= dx {
+            err += dx;
+            y += sy;
+        }
+    }
+}
+
+fn fill_rect(target: &mut RgbaImage, x0: i64, y0: i64, x1: i64, y1: i64, c: [u8; 4]) {
+    for y in y0.max(0)..y1.min(target.height() as i64) {
+        for x in x0.max(0)..x1.min(target.width() as i64) {
+            target.set_pixel(x as usize, y as usize, c);
+        }
+    }
+}
+
+/// A compass rose: four long points, four short, and a hub.
+fn draw_compass(target: &mut RgbaImage, cx: i64, cy: i64, r: i64) {
+    let ink = [72u8, 58, 40, 255];
+    let pale = [140u8, 122, 92, 255];
+
+    for k in 0..4 {
+        let (ax, ay) = [(0i64, -1i64), (1, 0), (0, 1), (-1, 0)][k];
+        let (bx, by) = [(1i64, 0i64), (0, 1), (-1, 0), (0, -1)][k];
+        let tip = (cx + ax * r, cy + ay * r);
+        let w = r / 5;
+        // Each cardinal point is two triangles meeting at the tip, one shaded.
+        stroke(target, cx + bx * w, cy + by * w, tip.0, tip.1, ink);
+        stroke(target, cx - bx * w, cy - by * w, tip.0, tip.1, ink);
+        // Ordinal point, half length.
+        let d = r / 2;
+        stroke(target, cx, cy, cx + (ax + bx) * d, cy + (ay + by) * d, pale);
+    }
+    fill_rect(target, cx - 1, cy - 1, cx + 2, cy + 2, ink);
+}
+
+/// A ruled border with tick marks, and a compass rose in the emptiest corner.
+fn draw_furniture(target: &mut RgbaImage, ocean: &Matrix<bool>, sw: usize, sh: usize) {
+    let ink = [86u8, 70, 48, 255];
+    let (w, h) = (sw as i64, sh as i64);
+    let m = ((sw.min(sh) as f64) * 0.018).round().max(4.0) as i64;
+
+    // Two rules, the outer heavier than the inner.
+    for (inset, thick) in [(m, 2i64), (m + m / 2, 1)] {
+        fill_rect(target, inset, inset, w - inset, inset + thick, ink);
+        fill_rect(target, inset, h - inset - thick, w - inset, h - inset, ink);
+        fill_rect(target, inset, inset, inset + thick, h - inset, ink);
+        fill_rect(target, w - inset - thick, inset, w - inset, h - inset, ink);
+    }
+
+    // Ticks between the rules, every sixteenth of the long side, longer at the
+    // quarters the way a graticule is.
+    let step = (w / 16).max(8);
+    for i in 1..16 {
+        let x = i as i64 * step;
+        let long = i % 4 == 0;
+        let len = if long { m / 2 } else { m / 3 };
+        fill_rect(target, x, m + 2, x + 1, m + 2 + len, ink);
+        fill_rect(target, x, h - m - 2 - len, x + 1, h - m - 2, ink);
+    }
+    let vstep = (h / 8).max(8);
+    for i in 1..8 {
+        let y = i as i64 * vstep;
+        let long = i % 2 == 0;
+        let len = if long { m / 2 } else { m / 3 };
+        fill_rect(target, m + 2, y, m + 2 + len, y + 1, ink);
+        fill_rect(target, w - m - 2 - len, y, w - m - 2, y + 1, ink);
+    }
+    // Put the rose wherever there is the most open water.
+    let r = ((sw.min(sh) as f64) * 0.055).round().max(10.0) as i64;
+    let pad = m * 3 + r;
+    let corners = [
+        (pad, pad),
+        (w - pad, pad),
+        (pad, h - pad),
+        (w - pad, h - pad),
+    ];
+    let mut best = corners[3];
+    let mut best_sea = -1i64;
+    for (cx, cy) in corners {
+        let mut sea = 0i64;
+        for y in (cy - r).max(0)..(cy + r).min(h) {
+            for x in (cx - r).max(0)..(cx + r).min(w) {
+                sea += i64::from(ocean[(y as usize, x as usize)]);
+            }
+        }
+        if sea > best_sea {
+            best_sea = sea;
+            best = (cx, cy);
+        }
+    }
+    draw_compass(target, best.0, best.1, r);
+}
+
+/// A small deterministic hash, for per-glyph variation.
+fn glyph_hash(x: i64, y: i64) -> u64 {
+    let mut h = (x as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
+        ^ (y as u64).wrapping_mul(0xC2B2_AE3D_27D4_EB4F);
+    h ^= h >> 29;
+    h = h.wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    h ^ (h >> 32)
+}
+
+/// A mountain with a ridge and, on the taller peaks, snow.
+///
+/// The plain glyph is a flat grey triangle with a hard right edge; the ridge is
+/// what makes it read as a solid rather than a cutout, and the snow line gives
+/// the range a sense of height.
+fn draw_a_mountain_engraved(target: &mut RgbaImage, x: i64, y: i64, w: f64, h: i64) {
+    draw_a_mountain(target, x, y, w, h);
+
+    // Ridge, offset from the centre so the two faces are unequal.
+    let lean = if glyph_hash(x, y) & 1 == 0 { 0.32 } else { -0.24 };
+    for mody in -h..=h {
+        let bottomness = ((mody + h) as f64 / 2.0) / w;
+        let span = bottomness * w;
+        let rx = (span * lean) as i64;
+        put(target, y + mody, x + rx, [48, 48, 48, 255]);
+    }
+
+    // Snow on the upper part of the taller peaks.
+    if h >= 5 {
+        let cap = ((h as f64) * 0.4).max(2.0) as i64;
+        for mody in -h..(-h + cap) {
+            let bottomness = ((mody + h) as f64 / 2.0) / w;
+            let span = (bottomness * w) as i64;
+            let t = ((mody + h) as f64 / cap as f64).clamp(0.0, 1.0);
+            // Ragged lower edge, so the snow line is not a clean cut.
+            let ragged = (glyph_hash(x + mody, y) % 3) as i64;
+            for itx in -span..=(span - ragged) {
+                let v = 238.0 - t * 70.0;
+                put(
+                    target,
+                    y + mody,
+                    x + itx,
+                    [v as u8, v as u8, (v + 10.0).min(255.0) as u8, 255],
+                );
+            }
+        }
+    }
+}
+
+/// A low dome, for ground that is raised but not mountainous.
+fn draw_hill(target: &mut RgbaImage, x: i64, y: i64, size: i64) {
+    let ink = [96u8, 84, 60, 255];
+    for dx in -size..=size {
+        let t = dx as f64 / size as f64;
+        let dy = -(((1.0 - t * t).max(0.0)).sqrt() * size as f64 * 0.55) as i64;
+        put(target, y + dy, x + dx, ink);
+        // A short stroke under the crown gives it some body.
+        if dx.abs() < size / 2 {
+            put(target, y + dy + 1, x + dx, [126, 114, 88, 255]);
+        }
+    }
+}
+
+/// Rivers with a casing, and a width that follows the flow.
+///
+/// A one-pixel blue line disappears against the biome fills; the darker casing
+/// is what keeps it legible, and the main rivers reading wider than the creeks
+/// is most of what makes a drawn river look drawn.
+fn draw_rivers_engraved(world: &World, target: &mut RgbaImage, factor: usize) {
+    let river_map = world.river_map.as_ref().expect("river map not set");
+    let lake_map = world.lake_map.as_ref().expect("lake map not set");
+
+    let casing = [38u8, 46, 78, 255];
+    let water = [30u8, 68, 140, 255];
+    let lake = [40u8, 96, 140, 255];
+
+    // Casing first, then the water over it, so the outline never covers a
+    // neighbouring river's core.
+    for pass in 0..2 {
+        for y in 0..world.height {
+            for x in 0..world.width {
+                if !world.is_land((x, y)) {
+                    continue;
+                }
+                let is_lake = lake_map[(y, x)] != 0.0;
+                if river_map[(y, x)] <= 0.0 && !is_lake {
+                    continue;
+                }
+                let wide = world.contains_main_river((x, y));
+                let grow = if pass == 0 { 1 } else { 0 } + i64::from(wide);
+                let (px, py) = ((x * factor) as i64, (y * factor) as i64);
+                let color = if pass == 0 {
+                    casing
+                } else if is_lake {
+                    lake
+                } else {
+                    water
+                };
+                for dy in -grow..(factor as i64 + grow) {
+                    for dx in -grow..(factor as i64 + grow) {
+                        let (tx, ty) = (px + dx, py + dy);
+                        if tx >= 0 && ty >= 0 && tx < target.width() as i64 && ty < target.height() as i64
+                        {
+                            target.set_pixel(tx as usize, ty as usize, color);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// How far from shore the coastal shading reaches, in pixels.
 const COAST_REACH: u8 = 14;
 
@@ -618,8 +839,37 @@ pub fn draw_ancientmap(world: &World, target: &mut RgbaImage, opts: AncientMapOp
         }
     }
 
+    if opts.style == AncientStyle::Engraved {
+        // Hills fill the gap between "mountain" and "nothing at all": a lot of
+        // land is raised without qualifying as a peak, and it read as flat.
+        // Spaced on a jittered grid so they scatter rather than tile.
+        let spacing = (4 * factor).max(4) as i64;
+        let size = (factor as i64).max(2);
+        let mut yy = spacing;
+        while yy < sh as i64 - spacing {
+            let mut xx = spacing;
+            while xx < sw as i64 - spacing {
+                let hash = glyph_hash(xx, yy);
+                let jx = xx + (hash % spacing as u64) as i64 - spacing / 2;
+                let jy = yy + ((hash >> 8) % spacing as u64) as i64 - spacing / 2;
+                if jx > size && jy > size && jx < sw as i64 - size && jy < sh as i64 - size {
+                    let cell = (jx as usize / factor, jy as usize / factor);
+                    if world.is_hill(cell) && !scaled_ocean[(jy as usize, jx as usize)] {
+                        draw_hill(target, jx, jy, size);
+                    }
+                }
+                xx += spacing;
+            }
+            yy += spacing;
+        }
+    }
+
     if opts.draw_rivers {
-        draw_rivers_on_image(world, target, factor);
+        if opts.style == AncientStyle::Engraved {
+            draw_rivers_engraved(world, target, factor);
+        } else {
+            draw_rivers_on_image(world, target, factor);
+        }
     }
 
     if opts.draw_mountains {
@@ -634,11 +884,19 @@ pub fn draw_ancientmap(world: &World, target: &mut RgbaImage, opts: AncientMapOp
                 let r = ((w / 3.0 * 2.0) as i64).max(h);
 
                 if border_integral.neighbours(r as usize, y, x) <= 2.0 {
-                    draw_a_mountain(target, x as i64, y as i64, w, h);
+                    if opts.style == AncientStyle::Engraved {
+                        draw_a_mountain_engraved(target, x as i64, y as i64, w, h);
+                    } else {
+                        draw_a_mountain(target, x as i64, y as i64, w, h);
+                    }
                     zero_box(mask, y as i64, x as i64, r);
                 }
             }
         }
+    }
+
+    if opts.style == AncientStyle::Engraved {
+        draw_furniture(target, &scaled_ocean, sw, sh);
     }
 }
 
