@@ -161,6 +161,11 @@
       <div class="field"><label for="width">Width</label><input id="width" type="number" value="256" min="5" max="1024"></div>
       <div class="field"><label for="height">Height</label><input id="height" type="number" value="128" min="5" max="1024"></div>
       <div class="field"><label for="numPlates">Plates</label><input id="numPlates" type="number" value="10" min="1" max="100"></div>
+      <div class="field">
+        <label for="plateExpansion" title="Run the plate simulation at 1/N of the world size and expand its output. Tectonics cost falls with the square of this.">Plate detail ÷</label>
+        <input id="plateExpansion" type="number" value="4" min="1" max="64">
+      </div>
+      <div class="field"><span class="hint" id="plateSizeHint"></span></div>
       <div class="field"><label for="oceanLevel">Ocean level</label><input id="oceanLevel" type="number" value="1.0" step="0.05"></div>
       <div class="field"><label for="gammaCurve">Gamma value</label><input id="gammaCurve" type="number" value="1.25" step="0.05"></div>
       <div class="field"><label for="curveOffset">Gamma offset</label><input id="curveOffset" type="number" value="0.2" step="0.05"></div>
@@ -185,7 +190,7 @@
         <input id="loadInput" type="file" accept=".world,application/octet-stream" hidden>
       </div>
       <p class="hint" style="margin-top:6px">`.world` files use worldengine's own protobuf format, so they interchange with the Python tool.</p>
-      <p class="hint" style="margin-top:10px">256×128 takes a couple of seconds. Nearly all of that is the plate tectonics simulation, whose cost grows sharply with area — 512×256 takes around 20 seconds. Everything after it runs in well under a second.</p>
+      <p class="hint" style="margin-top:10px">Plate tectonics dominates generation, and its cost grows with the square of the map side. <em>Plate detail ÷</em> runs it at a fraction of the world size and expands the result, which is why 512×256 now finishes in a fraction of a second rather than around twenty. It generates no structure below plate scale anyway; the later stages supply that detail. Set it to 1 for full-resolution tectonics.</p>
     </div>
   </div>
 

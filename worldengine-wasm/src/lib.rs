@@ -14,6 +14,7 @@ use worldengine::generation::{
 };
 use worldengine::matrix::Matrix;
 use worldengine::numpy::NumpyRng;
+use worldengine::plates::{expand_heights, expand_plates, plate_sim_size};
 use worldengine::serialization::protobuf;
 use worldengine::simulations;
 use worldengine::step::Step;
@@ -118,6 +119,9 @@ pub struct WorldGenerator {
     phase: Phase,
     fade_borders: bool,
     step: Step,
+    /// Size the plate simulation is running at, which may be smaller than the
+    /// world.
+    plate_size: (usize, usize),
 }
 
 #[wasm_bindgen]
@@ -135,6 +139,7 @@ impl WorldGenerator {
         gamma_curve: f64,
         curve_offset: f64,
         fade_borders: bool,
+        plate_expansion: u32,
     ) -> Result<WorldGenerator, JsError> {
         if temps.len() != 6 {
             return Err(JsError::new("expected 6 temperature thresholds"));
@@ -151,10 +156,14 @@ impl WorldGenerator {
         let mut h = [0.0; 7];
         h.copy_from_slice(humids);
 
+        // The tectonics runs at a fraction of the world size and its output is
+        // expanded when the phase ends; see `plates::plate_sim_size`.
+        let (pw, ph) = plate_sim_size(width, height, plate_expansion);
+
         let plates = PlatecSimulation::create(
             seed,
-            width as u32,
-            height as u32,
+            pw as u32,
+            ph as u32,
             0.65,
             60,
             0.02,
@@ -189,6 +198,7 @@ impl WorldGenerator {
             phase: Phase::PlatesSimulation,
             fade_borders,
             step: Step::Full,
+            plate_size: (pw, ph),
         })
     }
 
@@ -201,6 +211,9 @@ impl WorldGenerator {
     pub fn from_protobuf(bytes: &[u8]) -> Result<WorldGenerator, JsError> {
         let world = protobuf::unserialize(bytes).map_err(|e| JsError::new(&e.to_string()))?;
         let seed = world.seed;
+        // A loaded world has no plate simulation behind it, so nothing is ever
+        // expanded from this size.
+        let plate_size = (world.width, world.height);
         Ok(WorldGenerator {
             rng: NumpyRng::new(seed),
             seeds: seed_dict(seed),
@@ -209,6 +222,7 @@ impl WorldGenerator {
             plates: None,
             phase: Phase::Done,
             fade_borders: true,
+            plate_size,
         })
     }
 
@@ -299,9 +313,12 @@ impl WorldGenerator {
                     sim.step();
                 }
                 let (width, height) = (self.world.width, self.world.height);
-                let elevation: Vec<f64> =
-                    sim.heightmap().iter().map(|&v| v as f64).collect();
-                let plates: Vec<u16> = sim.platesmap().iter().map(|&v| v as u16).collect();
+                let (pw, ph) = self.plate_size;
+                let elevation = expand_heights(sim.heightmap(), pw, ph, width, height);
+                let plates: Vec<u16> = expand_plates(sim.platesmap(), pw, ph, width, height)
+                    .iter()
+                    .map(|&v| v as u16)
+                    .collect();
                 self.world.elevation = Some(LayerWithThresholds::new(
                     Matrix::from_vec(elevation, width, height),
                     Vec::new(),

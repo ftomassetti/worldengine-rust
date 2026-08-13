@@ -49,6 +49,7 @@ async function generate(params) {
     params.gammaCurve,
     params.curveOffset,
     params.fadeBorders,
+    params.plateExpansion,
   );
 
   // --- Phase 0: the plate tectonics simulation ----------------------------

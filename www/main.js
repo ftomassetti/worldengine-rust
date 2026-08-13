@@ -6,6 +6,7 @@ const $ = (id) => document.getElementById(id);
 
 const els = {
   seed: $('seed'), width: $('width'), height: $('height'), numPlates: $('numPlates'),
+  plateExpansion: $('plateExpansion'), plateSizeHint: $('plateSizeHint'),
   oceanLevel: $('oceanLevel'), gammaCurve: $('gammaCurve'), curveOffset: $('curveOffset'),
   fadeBorders: $('fadeBorders'), temps: $('temps'), humids: $('humids'),
   generate: $('generate'), randomSeed: $('randomSeed'),
@@ -280,6 +281,7 @@ function generate() {
       width: Math.max(5, Number(els.width.value) | 0),
       height: Math.max(5, Number(els.height.value) | 0),
       numPlates: Math.max(1, Number(els.numPlates.value) | 0),
+      plateExpansion: Math.min(64, Math.max(1, Number(els.plateExpansion.value) | 0)),
       oceanLevel: Number(els.oceanLevel.value),
       gammaCurve: Number(els.gammaCurve.value),
       curveOffset: Number(els.curveOffset.value),
@@ -344,3 +346,28 @@ els.view.addEventListener('change', () => {
 buildPhaseList();
 buildViewList();
 startWorker();
+
+
+// --- Plate detail hint ------------------------------------------------------
+
+/// Mirrors `plates::plate_sim_size`: the tectonics never runs below this side,
+/// since smaller than that the plates have no room to interact.
+const MIN_PLATE_SIDE = 48;
+
+function updatePlateSizeHint() {
+  const w = Math.max(5, Number(els.width.value) | 0);
+  const h = Math.max(5, Number(els.height.value) | 0);
+  const n = Math.min(64, Math.max(1, Number(els.plateExpansion.value) | 0));
+  const pw = Math.min(w, Math.max(MIN_PLATE_SIDE, Math.floor(w / n)));
+  const ph = Math.min(h, Math.max(MIN_PLATE_SIDE, Math.floor(h / n)));
+  const cells = (w * h) / (pw * ph);
+  els.plateSizeHint.textContent =
+    pw === w && ph === h
+      ? `tectonics at full ${w}\u00d7${h}`
+      : `tectonics at ${pw}\u00d7${ph}, expanded to ${w}\u00d7${h} (${cells.toFixed(1)}\u00d7 fewer cells)`;
+}
+
+for (const el of [els.width, els.height, els.plateExpansion]) {
+  el.addEventListener('input', updatePlateSizeHint);
+}
+updatePlateSizeHint();

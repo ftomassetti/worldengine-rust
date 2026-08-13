@@ -42,6 +42,100 @@ impl Default for PlatesParams {
     }
 }
 
+/// Smallest side the plate simulation is allowed to run at. Below roughly this
+/// the plates have no room to interact and the world degenerates.
+pub const MIN_PLATE_SIDE: usize = 48;
+
+/// Largest expansion factor accepted; beyond this the tectonics is too coarse
+/// to carry any structure.
+pub const MAX_PLATE_EXPANSION: u32 = 64;
+
+/// Catmull-Rom interpolation of four consecutive samples, `t` in [0, 1) between
+/// `p1` and `p2`.
+fn catmull_rom(p0: f64, p1: f64, p2: f64, p3: f64, t: f64) -> f64 {
+    0.5 * ((2.0 * p1)
+        + (-p0 + p2) * t
+        + (2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3) * t * t
+        + (-p0 + 3.0 * p1 - 3.0 * p2 + p3) * t * t * t)
+}
+
+/// Map an output coordinate to a source coordinate, sampling pixel centres.
+fn src_coord(i: usize, dst: usize, src: usize) -> f64 {
+    (i as f64 + 0.5) * src as f64 / dst as f64 - 0.5
+}
+
+/// Expand a height map with bicubic interpolation, wrapping at the edges
+/// because the world is a torus.
+///
+/// Bicubic rather than nearest or bilinear: the tectonics runs at a fraction of
+/// the world size, so a hard resample would leave visible blocks and stair-step
+/// coastlines for every later stage to build on.
+pub fn expand_heights(src: &[f32], sw: usize, sh: usize, dw: usize, dh: usize) -> Vec<f64> {
+    if sw == dw && sh == dh {
+        return src.iter().map(|&v| v as f64).collect();
+    }
+    let at = |x: i64, y: i64| -> f64 {
+        let xx = x.rem_euclid(sw as i64) as usize;
+        let yy = y.rem_euclid(sh as i64) as usize;
+        src[yy * sw + xx] as f64
+    };
+
+    let mut out = vec![0.0f64; dw * dh];
+    for y in 0..dh {
+        let fy = src_coord(y, dh, sh);
+        let y0 = fy.floor();
+        let ty = fy - y0;
+        let y0 = y0 as i64;
+        for x in 0..dw {
+            let fx = src_coord(x, dw, sw);
+            let x0 = fx.floor();
+            let tx = fx - x0;
+            let x0 = x0 as i64;
+
+            let mut cols = [0.0f64; 4];
+            for (k, col) in cols.iter_mut().enumerate() {
+                let yy = y0 - 1 + k as i64;
+                *col = catmull_rom(
+                    at(x0 - 1, yy),
+                    at(x0, yy),
+                    at(x0 + 1, yy),
+                    at(x0 + 2, yy),
+                    tx,
+                );
+            }
+            out[y * dw + x] = catmull_rom(cols[0], cols[1], cols[2], cols[3], ty);
+        }
+    }
+    out
+}
+
+/// Expand a plate ownership map by nearest neighbour: the values are plate
+/// indices, and interpolating between two of them means nothing.
+pub fn expand_plates(src: &[u32], sw: usize, sh: usize, dw: usize, dh: usize) -> Vec<u32> {
+    if sw == dw && sh == dh {
+        return src.to_vec();
+    }
+    let mut out = vec![0u32; dw * dh];
+    for y in 0..dh {
+        let sy = (src_coord(y, dh, sh).round() as i64).rem_euclid(sh as i64) as usize;
+        for x in 0..dw {
+            let sx = (src_coord(x, dw, sw).round() as i64).rem_euclid(sw as i64) as usize;
+            out[y * dw + x] = src[sy * sw + sx];
+        }
+    }
+    out
+}
+
+/// The size the plate simulation runs at for a world of `width` x `height`
+/// expanded by `expansion`, and the expansion actually applied.
+pub fn plate_sim_size(width: usize, height: usize, expansion: u32) -> (usize, usize) {
+    let n = expansion.clamp(1, MAX_PLATE_EXPANSION) as usize;
+    (
+        (width / n).max(MIN_PLATE_SIDE).min(width),
+        (height / n).max(MIN_PLATE_SIDE).min(height),
+    )
+}
+
 /// Run the plate tectonics simulation to completion, returning the height map
 /// and the plate ownership map.
 ///
@@ -84,6 +178,11 @@ pub struct WorldGenParams {
     pub gamma_curve: f64,
     pub curve_offset: f64,
     pub fade_borders: bool,
+    /// Run the plate simulation at 1/N of the world size and expand its output
+    /// by N before the rest of the pipeline. Tectonics cost falls with the
+    /// square of this, and it generates no structure below plate scale anyway,
+    /// so the detail lost is detail the later stages supply. 1 disables it.
+    pub plate_expansion: u32,
 }
 
 impl Default for WorldGenParams {
@@ -97,6 +196,7 @@ impl Default for WorldGenParams {
             gamma_curve: 1.25,
             curve_offset: 0.2,
             fade_borders: true,
+            plate_expansion: 4,
         }
     }
 }
@@ -114,7 +214,8 @@ pub fn plates_simulation(
         num_plates: params.num_plates,
         ..PlatesParams::default()
     };
-    let (e_as_array, p_as_array) = generate_plates_simulation(seed, width, height, plate_params);
+    let (pw, ph) = plate_sim_size(width, height, params.plate_expansion);
+    let (e_as_array, p_as_array) = generate_plates_simulation(seed, pw, ph, plate_params);
 
     let mut world = World::new(
         name,
@@ -132,13 +233,18 @@ pub fn plates_simulation(
         params.curve_offset,
     );
 
-    // The C library produces `float`s; numpy widens them to float64 exactly.
-    let elevation: Vec<f64> = e_as_array.iter().map(|&v| v as f64).collect();
+    // The simulation produces `f32`; widening to f64 is exact. When the
+    // tectonics ran at a reduced size, the maps are expanded to the world here,
+    // so every later stage sees a full-size world and needs no changes.
+    let elevation = expand_heights(&e_as_array, pw, ph, width, height);
     world.elevation = Some(LayerWithThresholds::new(
         Matrix::from_vec(elevation, width, height),
         Vec::new(),
     ));
-    let plates: Vec<u16> = p_as_array.iter().map(|&v| v as u16).collect();
+    let plates: Vec<u16> = expand_plates(&p_as_array, pw, ph, width, height)
+        .iter()
+        .map(|&v| v as u16)
+        .collect();
     world.plates = Some(Matrix::from_vec(plates, width, height));
 
     world
