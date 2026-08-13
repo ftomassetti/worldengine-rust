@@ -301,6 +301,58 @@ function spaced(items, cap, minDist) {
   return kept;
 }
 
+/// Draw the river network, thinned to the channels worth showing.
+///
+/// Every river cell joined to its downhill neighbour is the whole drainage
+/// network, which at 4096 cells is finer than any stroke that would be visible:
+/// neighbouring cells sit a fraction of a pixel apart and the strokes merge
+/// into blobs. Keeping the higher-flow cells leaves the trunks, which is what a
+/// map shows.
+export function drawRiverNetwork(ctx, world, sx, sy, { color, width, s }) {
+  const { width: w, height: h, elevation, ocean, river } = world;
+
+  // Threshold from the flow that is actually present, so it follows the world
+  // rather than a constant that suits one map size.
+  const flows = [];
+  for (let i = 0; i < river.length; i++) if (river[i] > 0 && !ocean[i]) flows.push(river[i]);
+  if (flows.length === 0) return;
+  flows.sort((a, b) => a - b);
+  // Denser grids need more thinning: aim for a similar number of drawn cells
+  // whatever the resolution.
+  const budget = Math.min(flows.length, Math.round(w * 2.5));
+  const cut = flows[Math.max(0, flows.length - budget)];
+
+  ctx.save();
+  ctx.strokeStyle = color;
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+  const main = flows[Math.max(0, flows.length - Math.round(budget * 0.25))];
+
+  for (const heavy of [false, true]) {
+    ctx.lineWidth = (heavy ? width : width * 0.65) * s;
+    ctx.beginPath();
+    for (let y = 1; y < h - 1; y++) {
+      for (let x = 1; x < w - 1; x++) {
+        const i = y * w + x;
+        const f = river[i];
+        if (f < cut || ocean[i]) continue;
+        if ((f >= main) !== heavy) continue;
+        let bx = x, by = y, be = elevation[i];
+        for (let dy = -1; dy <= 1; dy++) {
+          for (let dx = -1; dx <= 1; dx++) {
+            const e = elevation[(y + dy) * w + (x + dx)];
+            if (e < be) { be = e; bx = x + dx; by = y + dy; }
+          }
+        }
+        ctx.moveTo(x * sx, y * sy);
+        ctx.lineTo(bx * sx, by * sy);
+      }
+    }
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
 // --- 2f. Fantasy chart ------------------------------------------------------
 
 const F = {
@@ -315,7 +367,7 @@ const F = {
 
 /// A pronounceable name from the seed, so the sheet is titled rather than
 /// stamped with a generator argument.
-function worldTitle(seed) {
+export function worldTitle(seed) {
   const first = ['Aer', 'Bel', 'Cor', 'Dun', 'El', 'Fen', 'Gal', 'Hal', 'Ith', 'Kor', 'Mar', 'Nor'];
   const last = ['adia', 'anor', 'aria', 'endil', 'gard', 'heim', 'mara', 'nesse', 'ovia', 'thas'];
   const n = Math.abs(Number(seed) | 0);
@@ -368,29 +420,7 @@ export function drawFantasyChart(ctx, world, cw, ch) {
   ctx.restore();
 
   // 2. Rivers, running downhill to the sea.
-  ctx.save();
-  ctx.strokeStyle = F.river;
-  ctx.lineWidth = 1.3 * s;
-  ctx.lineCap = 'round';
-  ctx.beginPath();
-  for (let y = 1; y < h - 1; y++) {
-    for (let x = 1; x < w - 1; x++) {
-      const i = y * w + x;
-      if (river[i] <= 0 || ocean[i]) continue;
-      // Join to the lowest neighbour, which is where the water went.
-      let bx = x, by = y, be = elevation[i];
-      for (let dy = -1; dy <= 1; dy++) {
-        for (let dx = -1; dx <= 1; dx++) {
-          const e = elevation[(y + dy) * w + (x + dx)];
-          if (e < be) { be = e; bx = x + dx; by = y + dy; }
-        }
-      }
-      ctx.moveTo(x * sx, y * sy);
-      ctx.lineTo(bx * sx, by * sy);
-    }
-  }
-  ctx.stroke();
-  ctx.restore();
+  drawRiverNetwork(ctx, world, sx, sy, { color: F.river, width: 1.3, s });
 
   // 3. Woods.
   const woodIds = groupNames
@@ -525,4 +555,174 @@ export function drawFantasyChart(ctx, world, cw, ch) {
 
   paperGrain(ctx, cw, ch, 0.12);
   edgeVignette(ctx, cw, ch, 0.22);
+}
+
+
+// --- 2b. Modern topographic -------------------------------------------------
+//
+// A data view rather than a drawing: hypsometric tints multiplied by hillshade,
+// with contours, coastline and rivers over the top. No invented geography — no
+// countries, borders or settlements — so everything on it comes from the world.
+
+/// Piecewise-linear ramp over stops given as `[position, '#rrggbb']`.
+function rampLut(stops) {
+  const hex = (c) => [
+    parseInt(c.slice(1, 3), 16),
+    parseInt(c.slice(3, 5), 16),
+    parseInt(c.slice(5, 7), 16),
+  ];
+  const pts = stops.map(([t, c]) => [t, hex(c)]);
+  const lut = new Uint8Array(256 * 3);
+  for (let i = 0; i < 256; i++) {
+    const t = i / 255;
+    let k = 0;
+    while (k < pts.length - 2 && t > pts[k + 1][0]) k++;
+    const [t0, c0] = pts[k];
+    const [t1, c1] = pts[k + 1];
+    const f = t1 > t0 ? Math.min(1, Math.max(0, (t - t0) / (t1 - t0))) : 0;
+    for (let ch = 0; ch < 3; ch++) lut[i * 3 + ch] = c0[ch] + (c1[ch] - c0[ch]) * f;
+  }
+  return lut;
+}
+
+const HYPSO = rampLut([
+  [0, '#b0cd9c'], [0.06, '#a9c891'], [0.30, '#d3cf93'], [0.55, '#c2a578'],
+  [0.75, '#a98f78'], [0.90, '#cfc9c2'], [1, '#ffffff'],
+]);
+const SEA_RAMP = rampLut([[0, '#a6c9da'], [0.5, '#7ba7c2'], [1, '#517f9f']]);
+
+export function drawTopographic(ctx, world, cw, ch) {
+  const { width: w, height: h, elevation, ocean, river, seaLevel, groups, groupNames } = world;
+  const s = Math.min(cw / 600, ch / 480);
+  const sx = cw / w;
+  const sy = ch / h;
+
+  let emax = -Infinity, emin = Infinity;
+  for (let i = 0; i < elevation.length; i++) {
+    if (elevation[i] > emax) emax = elevation[i];
+    if (elevation[i] < emin) emin = elevation[i];
+  }
+  const span = Math.max(1e-6, emax - seaLevel);
+  const deep = Math.max(1e-6, seaLevel - emin);
+
+  // Base raster at grid resolution, then scaled up: the tints and the shading
+  // are per cell, so there is nothing to gain from computing them per pixel.
+  const base = document.createElement('canvas');
+  base.width = w;
+  base.height = h;
+  const bctx = base.getContext('2d');
+  const img = bctx.createImageData(w, h);
+  const d = img.data;
+
+  const at = (x, y) => elevation[Math.min(h - 1, Math.max(0, y)) * w + Math.min(w - 1, Math.max(0, x))];
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const i = y * w + x;
+      const o = i * 4;
+      d[o + 3] = 255;
+      if (ocean[i]) {
+        const t = Math.min(255, Math.max(0, ((seaLevel - elevation[i]) / deep) * 255)) | 0;
+        d[o] = SEA_RAMP[t * 3];
+        d[o + 1] = SEA_RAMP[t * 3 + 1];
+        d[o + 2] = SEA_RAMP[t * 3 + 2];
+        continue;
+      }
+      // Light from the north-west: the slope along both axes darkens the cell.
+      const slope = (at(x + 1, y) - at(x - 1, y)) + (at(x, y + 1) - at(x, y - 1));
+      const shade = Math.min(1.4, Math.max(0.55, 1 - (slope / span) * 1.6));
+      const t = Math.min(255, Math.max(0, ((elevation[i] - seaLevel) / span) * 255)) | 0;
+      d[o] = Math.min(255, HYPSO[t * 3] * shade);
+      d[o + 1] = Math.min(255, HYPSO[t * 3 + 1] * shade);
+      d[o + 2] = Math.min(255, HYPSO[t * 3 + 2] * shade);
+    }
+  }
+  bctx.putImageData(img, 0, 0);
+  ctx.imageSmoothingEnabled = true;
+  ctx.drawImage(base, 0, 0, cw, ch);
+
+  // Contours every ninth of the land range, above the shore.
+  ctx.save();
+  ctx.strokeStyle = 'rgba(90,70,50,0.16)';
+  ctx.lineWidth = 0.6 * s;
+  for (let k = 1; k < 11; k++) {
+    const level = seaLevel + (0.08 + (k - 1) * 0.09) * span;
+    if (level >= emax) break;
+    const lines = contour((x, y) => elevation[y * w + x] >= level, w, h);
+    tracePath(ctx, lines, sx, sy);
+    ctx.stroke();
+  }
+  ctx.restore();
+
+  // Coastline.
+  const coast = contour((x, y) => !ocean[y * w + x], w, h);
+  ctx.save();
+  ctx.strokeStyle = '#5d84a0';
+  ctx.lineWidth = 1.1 * s;
+  ctx.lineJoin = 'round';
+  tracePath(ctx, coast, sx, sy);
+  ctx.stroke();
+  ctx.restore();
+
+  // Rivers.
+  drawRiverNetwork(ctx, world, sx, sy, { color: '#38648a', width: 1.5, s });
+
+  // Labels: physical features only, anchored to the data.
+  const sans = (px, style = '') =>
+    `${style} ${Math.round(px * s)}px Helvetica, Arial, sans-serif`.trim();
+  const halo = '#eef2ec';
+
+  let lc = 0, lx = 0, ly = 0;
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) if (!ocean[y * w + x]) { lx += x; ly += y; lc++; }
+  }
+  const cxg = Math.round(lx / Math.max(1, lc));
+  const cyg = Math.round(ly / Math.max(1, lc));
+  if (lc > 0 && !ocean[Math.min(h - 1, cyg) * w + Math.min(w - 1, cxg)]) {
+    haloText(ctx, world.title.toUpperCase(), cxg * sx, cyg * sy, {
+      font: sans(13, '600'), fill: '#6a6152', halo, s, spacing: 4 * s,
+    });
+  }
+
+  const peaks = findPeaks(elevation, ocean, w, h, {
+    radius: Math.max(4, Math.round(w / 150)), minRise: 0.18, seaLevel, span,
+  });
+  if (peaks.length) {
+    haloText(ctx, `${world.title} Range`, peaks[0].x * sx, peaks[0].y * sy - 8 * s, {
+      font: sans(10, 'italic'), fill: '#7a6f5e', halo, s,
+    });
+  }
+
+  const woodIds = groupNames
+    .map((n, i) => [n.toLowerCase(), i])
+    .filter(([n]) => n.includes('forest') || n.includes('jungle'))
+    .map(([, i]) => i);
+  const woodSet = new Set(woodIds);
+  let fc = 0, fx = 0, fy = 0;
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) if (woodSet.has(groups[y * w + x])) { fx += x; fy += y; fc++; }
+  }
+  if (fc > 0) {
+    haloText(ctx, 'Great Forest', (fx / fc) * sx, (fy / fc) * sy, {
+      font: sans(10, 'italic'), fill: '#4f6b47', halo, s,
+    });
+  }
+
+  // Scale bar. The world has no stated size, so this is in cells.
+  const bar = 80 * s;
+  const bx = 18 * s;
+  const by = ch - 24 * s;
+  ctx.save();
+  ctx.fillStyle = '#444';
+  ctx.fillRect(bx, by, bar, 4 * s);
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(bx + bar / 2, by, bar / 2, 4 * s);
+  ctx.strokeStyle = '#444';
+  ctx.lineWidth = 0.7 * s;
+  ctx.strokeRect(bx, by, bar, 4 * s);
+  ctx.font = sans(9);
+  ctx.fillStyle = '#333';
+  ctx.textAlign = 'left';
+  const cells = Math.round((bar / sx) | 0);
+  ctx.fillText(`0${' '.repeat(8)}${(cells / 2) | 0}${' '.repeat(7)}${cells} cells`, bx, by - 5 * s);
+  ctx.restore();
 }

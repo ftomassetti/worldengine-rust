@@ -4,7 +4,7 @@
 // rather than a rendered frame, and draws it on the main thread.
 
 import { createTerrainView3D } from './view3d.js';
-import { drawFantasyChart } from './mapstyles.js';
+import { drawFantasyChart, drawTopographic, worldTitle } from './mapstyles.js';
 import { zipStore } from './zip.js';
 
 const $ = (id) => document.getElementById(id);
@@ -38,7 +38,10 @@ const PHASES = [
 /// The 3D entries, as `[select value, label]`. `3d:<id>` drapes that 2D map
 /// over the relief; plain `3d` uses the height ramp.
 /// Drawn styles, rendered here from the world data rather than in the wasm.
-const VIEWS_STYLED = [['fantasy', 'Fantasy chart']];
+const VIEWS_STYLED = [
+  ['topographic', 'Topographic chart'],
+  ['fantasy', 'Fantasy chart'],
+];
 
 const isStyled = (v) => typeof v === 'string' && VIEWS_STYLED.some(([k]) => k === v);
 
@@ -383,7 +386,10 @@ function drawStyled() {
   els.canvas.height = ch;
   const c = els.canvas.getContext('2d');
   c.clearRect(0, 0, cw, ch);
-  drawFantasyChart(c, { ...chartData, name: chartData.seed, seed: els.seed.value }, cw, ch);
+  const seed = Math.max(0, Number(els.seed.value) | 0);
+  const data = { ...chartData, seed, title: worldTitle(seed) };
+  if (els.view.value === 'topographic') drawTopographic(c, data, cw, ch);
+  else drawFantasyChart(c, data, cw, ch);
   setStatus(`Showing ${viewName(els.view.value)}.`);
 }
 
@@ -725,14 +731,9 @@ els.downloadAll.addEventListener('click', async () => {
         scratch.width = Math.min(CHART_MAX_WIDTH, chartData.width);
         scratch.height = Math.round(scratch.width * aspect);
         sctx.clearRect(0, 0, scratch.width, scratch.height);
-        if (key === 'fantasy') {
-          drawFantasyChart(
-            sctx,
-            { ...chartData, name: chartData.seed, seed },
-            scratch.width,
-            scratch.height,
-          );
-        }
+        const data = { ...chartData, seed, title: worldTitle(seed) };
+        if (key === 'topographic') drawTopographic(sctx, data, scratch.width, scratch.height);
+        else drawFantasyChart(sctx, data, scratch.width, scratch.height);
         files.push({ name: `${seed}_${slug(name)}.png`, data: await canvasToBytes(scratch) });
       }
     }
