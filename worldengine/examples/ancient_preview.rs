@@ -7,8 +7,8 @@ use worldengine::plates::{world_gen, WorldGenParams};
 fn main() {
     let dir = std::env::args().nth(1).expect("usage: ancient_preview <out-dir>");
     std::fs::create_dir_all(&dir).unwrap();
-    let (w, h) = (1024usize, 512);
-    let params = WorldGenParams { plate_expansion: 4, ..WorldGenParams::default() };
+    let (w, h) = (2048usize, 1024);
+    let params = WorldGenParams { plate_expansion: 8, ..WorldGenParams::default() };
     let mut rng = NumpyRng::new(28070);
     let world = world_gen("preview", w, h, 28070, &params, &mut rng);
 

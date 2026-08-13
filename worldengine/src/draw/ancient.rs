@@ -215,7 +215,7 @@ fn fill_rect(target: &mut RgbaImage, x0: i64, y0: i64, x1: i64, y1: i64, c: [u8;
 }
 
 /// A compass rose: four long points, four short, and a hub.
-fn draw_compass(target: &mut RgbaImage, cx: i64, cy: i64, r: i64) {
+fn draw_compass(target: &mut RgbaImage, cx: i64, cy: i64, r: i64, scale: f64) {
     let ink = [72u8, 58, 40, 255];
     let pale = [140u8, 122, 92, 255];
 
@@ -225,23 +225,30 @@ fn draw_compass(target: &mut RgbaImage, cx: i64, cy: i64, r: i64) {
         let tip = (cx + ax * r, cy + ay * r);
         let w = r / 5;
         // Each cardinal point is two triangles meeting at the tip, one shaded.
-        stroke(target, cx + bx * w, cy + by * w, tip.0, tip.1, ink);
-        stroke(target, cx - bx * w, cy - by * w, tip.0, tip.1, ink);
-        // Ordinal point, half length.
-        let d = r / 2;
-        stroke(target, cx, cy, cx + (ax + bx) * d, cy + (ay + by) * d, pale);
+        // Repeated with a one-pixel offset so the strokes thicken with the map.
+        let t = scale.round() as i64;
+        for o in 0..t {
+            stroke(target, cx + bx * w + o, cy + by * w, tip.0 + o, tip.1, ink);
+            stroke(target, cx - bx * w + o, cy - by * w, tip.0 + o, tip.1, ink);
+            let d = r / 2;
+            stroke(target, cx + o, cy, cx + (ax + bx) * d + o, cy + (ay + by) * d, pale);
+        }
     }
-    fill_rect(target, cx - 1, cy - 1, cx + 2, cy + 2, ink);
+    let hub = (2.0 * scale) as i64;
+    fill_rect(target, cx - hub, cy - hub, cx + hub, cy + hub, ink);
 }
 
 /// A ruled border with tick marks, and a compass rose in the emptiest corner.
 fn draw_furniture(target: &mut RgbaImage, ocean: &Matrix<bool>, sw: usize, sh: usize) {
     let ink = [86u8, 70, 48, 255];
     let (w, h) = (sw as i64, sh as i64);
+    let scale = ink_scale(sw, sh);
     let m = ((sw.min(sh) as f64) * 0.018).round().max(4.0) as i64;
+    let heavy = (2.0 * scale).round() as i64;
+    let light = scale.round() as i64;
 
     // Two rules, the outer heavier than the inner.
-    for (inset, thick) in [(m, 2i64), (m + m / 2, 1)] {
+    for (inset, thick) in [(m, heavy), (m + m / 2, light)] {
         fill_rect(target, inset, inset, w - inset, inset + thick, ink);
         fill_rect(target, inset, h - inset - thick, w - inset, h - inset, ink);
         fill_rect(target, inset, inset, inset + thick, h - inset, ink);
@@ -255,16 +262,16 @@ fn draw_furniture(target: &mut RgbaImage, ocean: &Matrix<bool>, sw: usize, sh: u
         let x = i as i64 * step;
         let long = i % 4 == 0;
         let len = if long { m / 2 } else { m / 3 };
-        fill_rect(target, x, m + 2, x + 1, m + 2 + len, ink);
-        fill_rect(target, x, h - m - 2 - len, x + 1, h - m - 2, ink);
+        fill_rect(target, x, m + 2, x + light, m + 2 + len, ink);
+        fill_rect(target, x, h - m - 2 - len, x + light, h - m - 2, ink);
     }
     let vstep = (h / 8).max(8);
     for i in 1..8 {
         let y = i as i64 * vstep;
         let long = i % 2 == 0;
         let len = if long { m / 2 } else { m / 3 };
-        fill_rect(target, m + 2, y, m + 2 + len, y + 1, ink);
-        fill_rect(target, w - m - 2 - len, y, w - m - 2, y + 1, ink);
+        fill_rect(target, m + 2, y, m + 2 + len, y + light, ink);
+        fill_rect(target, w - m - 2 - len, y, w - m - 2, y + light, ink);
     }
     // Put the rose wherever there is the most open water.
     let r = ((sw.min(sh) as f64) * 0.055).round().max(10.0) as i64;
@@ -289,7 +296,7 @@ fn draw_furniture(target: &mut RgbaImage, ocean: &Matrix<bool>, sw: usize, sh: u
             best = (cx, cy);
         }
     }
-    draw_compass(target, best.0, best.1, r);
+    draw_compass(target, best.0, best.1, r, scale);
 }
 
 /// A small deterministic hash, for per-glyph variation.
@@ -403,12 +410,21 @@ fn draw_rivers_engraved(world: &World, target: &mut RgbaImage, factor: usize) {
     }
 }
 
-/// How far from shore the coastal shading reaches, in pixels.
-const COAST_REACH: u8 = 14;
+/// How heavy the engraving is, for a map of this size.
+///
+/// Every mark here — the shore lines, the frame, the glyphs — used to be sized
+/// in pixels, so a 4096-wide map got the same 14-pixel coastal shading as a
+/// 512-wide one and it vanished when the map was viewed whole. Sizing the ink
+/// relative to the map keeps the drawing looking the same at any resolution.
+fn ink_scale(sw: usize, sh: usize) -> f64 {
+    ((sw.min(sh) as f64) / 512.0).clamp(1.0, 4.0)
+}
 
-/// Distances at which a crisp line is drawn, the engraver's concentric shore
-/// lines.
-const COAST_RINGS: [u8; 3] = [3, 7, 12];
+/// How far from shore the coastal shading reaches, before scaling.
+const COAST_REACH: f64 = 14.0;
+
+/// Where the crisp shore lines fall, as fractions of the reach.
+const COAST_RINGS: [f64; 3] = [0.22, 0.5, 0.85];
 
 /// Value noise from a hashed lattice, smoothly interpolated. Used for the
 /// parchment mottling, which wants to be blotchy rather than per-pixel.
@@ -438,10 +454,20 @@ fn parchment(x: f64, y: f64) -> f64 {
 /// away from it; and the sea is not one flat colour, because the parchment
 /// underneath is uneven.
 fn engrave_sea(target: &mut RgbaImage, ocean: &Matrix<bool>, sw: usize, sh: usize) {
+    let scale = ink_scale(sw, sh);
+    let reach = (COAST_REACH * scale).round() as u16;
+    let rings: [u16; 3] = [
+        (f64::from(reach) * COAST_RINGS[0]).round() as u16,
+        (f64::from(reach) * COAST_RINGS[1]).round() as u16,
+        (f64::from(reach) * COAST_RINGS[2]).round() as u16,
+    ];
+    // Rings get thicker with the map too, or they alias away when it is shrunk
+    // to fit a screen.
+    let ring_half = ((scale - 1.0) * 0.5).round() as u16;
     // Chebyshev distance from land, over sea cells, capped at COAST_REACH. A
     // breadth-first walk outward from the shore only visits the water near it,
     // which is a small part of the map.
-    let mut dist = vec![u8::MAX; sw * sh];
+    let mut dist = vec![u16::MAX; sw * sh];
     let mut queue = std::collections::VecDeque::new();
     for y in 0..sh {
         for x in 0..sw {
@@ -453,7 +479,7 @@ fn engrave_sea(target: &mut RgbaImage, ocean: &Matrix<bool>, sw: usize, sh: usiz
     }
     while let Some((x, y)) = queue.pop_front() {
         let d = dist[y * sw + x];
-        if d >= COAST_REACH {
+        if d >= reach {
             continue;
         }
         for dy in -1i64..=1 {
@@ -464,7 +490,7 @@ fn engrave_sea(target: &mut RgbaImage, ocean: &Matrix<bool>, sw: usize, sh: usiz
                     continue;
                 }
                 let (nx, ny) = (nx as usize, ny as usize);
-                if !ocean[(ny, nx)] || dist[ny * sw + nx] != u8::MAX {
+                if !ocean[(ny, nx)] || dist[ny * sw + nx] != u16::MAX {
                     continue;
                 }
                 dist[ny * sw + nx] = d + 1;
@@ -483,16 +509,16 @@ fn engrave_sea(target: &mut RgbaImage, ocean: &Matrix<bool>, sw: usize, sh: usiz
 
             // Mottling everywhere, so the open sea is not a flat fill. Two
             // octaves: broad blotches with a finer grain over them.
-            let mottle = parchment(x as f64 / 90.0, y as f64 / 90.0) * 0.75
-                + parchment(x as f64 / 23.0, y as f64 / 23.0) * 0.25;
+            let mottle = parchment(x as f64 / (90.0 * scale), y as f64 / (90.0 * scale)) * 0.75
+                + parchment(x as f64 / (23.0 * scale), y as f64 / (23.0 * scale)) * 0.25;
             let mut shade = (mottle - 0.5) * 0.10;
 
             // Water darkens towards the shore, and a few crisp lines run
             // parallel to it.
-            if d <= COAST_REACH {
-                let t = 1.0 - f64::from(d) / f64::from(COAST_REACH);
+            if d <= reach {
+                let t = 1.0 - f64::from(d) / f64::from(reach);
                 shade -= 0.30 * t * t;
-                if COAST_RINGS.contains(&d) {
+                if rings.iter().any(|r| d.abs_diff(*r) <= ring_half) {
                     shade -= 0.14;
                 }
             }
@@ -843,8 +869,9 @@ pub fn draw_ancientmap(world: &World, target: &mut RgbaImage, opts: AncientMapOp
         // Hills fill the gap between "mountain" and "nothing at all": a lot of
         // land is raised without qualifying as a peak, and it read as flat.
         // Spaced on a jittered grid so they scatter rather than tile.
-        let spacing = (4 * factor).max(4) as i64;
-        let size = (factor as i64).max(2);
+        let scale = ink_scale(sw, sh);
+        let spacing = ((4 * factor) as f64 * scale).max(4.0) as i64;
+        let size = ((factor as f64 * scale) as i64).max(2);
         let mut yy = spacing;
         while yy < sh as i64 - spacing {
             let mut xx = spacing;
@@ -879,8 +906,17 @@ pub fn draw_ancientmap(world: &World, target: &mut RgbaImage, opts: AncientMapOp
                 if mask[(y, x)] <= 0.0 {
                     continue;
                 }
-                let w = mask[(y, x)];
-                let h = 3 + world.level_of_mountain((x / factor, y / factor)) as i64;
+                // In the engraved style the glyph grows with the map, and the
+                // spacing radius grows with it, so the peaks stay as far apart
+                // relative to the range as they were.
+                let gs = if opts.style == AncientStyle::Engraved {
+                    ink_scale(sw, sh)
+                } else {
+                    1.0
+                };
+                let w = mask[(y, x)] * gs;
+                let h = ((3 + world.level_of_mountain((x / factor, y / factor)) as i64) as f64 * gs)
+                    as i64;
                 let r = ((w / 3.0 * 2.0) as i64).max(h);
 
                 if border_integral.neighbours(r as usize, y, x) <= 2.0 {
