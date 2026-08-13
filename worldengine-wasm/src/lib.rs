@@ -511,6 +511,69 @@ impl WorldGenerator {
             .unwrap_or(0.0)
     }
 
+    /// Biome group per cell, as a small integer, with 255 for ocean or unset.
+    /// The names for those indices come from `biomeGroupNames`.
+    #[wasm_bindgen(js_name = biomeGroups)]
+    pub fn biome_groups(&self) -> Vec<u8> {
+        let (Some(biome), Some(ocean)) = (self.world.biome.as_ref(), self.world.ocean.as_ref())
+        else {
+            return Vec::new();
+        };
+        let groups = worldengine::biome::BiomeGroup::ALL;
+        biome
+            .as_slice()
+            .iter()
+            .zip(ocean.as_slice())
+            .map(|(b, &is_ocean)| {
+                if is_ocean {
+                    return 255u8;
+                }
+                b.group()
+                    .and_then(|g| groups.iter().position(|c| *c == g))
+                    .map_or(255, |i| i as u8)
+            })
+            .collect()
+    }
+
+    /// Names for the indices `biomeGroups` returns, newline separated.
+    #[wasm_bindgen(js_name = biomeGroupNames)]
+    pub fn biome_group_names(&self) -> String {
+        worldengine::biome::BiomeGroup::ALL
+            .iter()
+            .map(|g| g.name())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Water flow per cell: 0 where there is none. Rivers and lakes merged,
+    /// which is what a drawn map wants.
+    #[wasm_bindgen(js_name = riverFlow)]
+    pub fn river_flow(&self) -> Vec<f32> {
+        let Some(river) = self.world.river_map.as_ref() else {
+            return Vec::new();
+        };
+        let lake = self.world.lake_map.as_ref();
+        river
+            .as_slice()
+            .iter()
+            .enumerate()
+            .map(|(i, &r)| {
+                let l = lake.map_or(0.0, |m| m.as_slice()[i]);
+                (r.max(l)) as f32
+            })
+            .collect()
+    }
+
+    /// True where the cell is sea.
+    #[wasm_bindgen(js_name = oceanMask)]
+    pub fn ocean_mask(&self) -> Vec<u8> {
+        self.world
+            .ocean
+            .as_ref()
+            .map(|o| o.as_slice().iter().map(|&b| u8::from(b)).collect())
+            .unwrap_or_default()
+    }
+
     /// A tally of biome names and their cell counts, as `name\tcount` lines.
     #[wasm_bindgen(js_name = biomeCounts)]
     pub fn biome_counts(&self) -> String {

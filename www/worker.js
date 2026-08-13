@@ -130,6 +130,25 @@ onmessage = async (event) => {
       case 'cancel':
         cancelled = true;
         break;
+      case 'chartData': {
+        // Everything the drawn styles place marks from.
+        const elevation = generator.elevationF32();
+        const river = generator.riverFlow();
+        const ocean = generator.oceanMask();
+        const groups = generator.biomeGroups();
+        postMessage(
+          {
+            type: 'chartData',
+            width: generator.width(), height: generator.height(),
+            seaLevel: generator.seaLevel(), seed: generator.name(),
+            groupNames: generator.biomeGroupNames().split('\n'),
+            elevation, river, ocean, groups,
+          },
+          [elevation.buffer, river.buffer, ocean.buffer, groups.buffer],
+        );
+        break;
+      }
+
       case 'elevation': {
         // f32 rather than f64: it is what the GPU wants and half the bytes to
         // copy across the worker boundary.

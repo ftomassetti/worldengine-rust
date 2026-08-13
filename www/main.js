@@ -4,6 +4,8 @@
 // rather than a rendered frame, and draws it on the main thread.
 
 import { createTerrainView3D } from './view3d.js';
+import { drawFantasyChart } from './mapstyles.js';
+import { zipStore } from './zip.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -11,7 +13,7 @@ const els = {
   seed: $('seed'), width: $('width'), height: $('height'), numPlates: $('numPlates'),
   plateExpansion: $('plateExpansion'), plateSizeHint: $('plateSizeHint'),
   canvas3d: $('canvas3d'), controls3d: $('controls3d'), exag: $('exag'),
-  download: $('download'),
+  download: $('download'), downloadAll: $('downloadAll'),
   oceanLevel: $('oceanLevel'), gammaCurve: $('gammaCurve'), curveOffset: $('curveOffset'),
   fadeBorders: $('fadeBorders'), temps: $('temps'), humids: $('humids'),
   generate: $('generate'), randomSeed: $('randomSeed'),
@@ -35,6 +37,11 @@ const PHASES = [
 
 /// The 3D entries, as `[select value, label]`. `3d:<id>` drapes that 2D map
 /// over the relief; plain `3d` uses the height ramp.
+/// Drawn styles, rendered here from the world data rather than in the wasm.
+const VIEWS_STYLED = [['fantasy', 'Fantasy chart']];
+
+const isStyled = (v) => typeof v === 'string' && VIEWS_STYLED.some(([k]) => k === v);
+
 const VIEWS_3D = [
   ['3d', 'Terrain (3D)'],
   ['3d:6', 'Biome (3D)'],
@@ -108,7 +115,7 @@ function buildViewList() {
   }
   // The 3D views. `3d` colours by its own height ramp; `3d:<id>` drapes the
   // given 2D map over the relief.
-  for (const [value, name] of VIEWS_3D) {
+  for (const [value, name] of [...VIEWS_3D, ...VIEWS_STYLED]) {
     const opt = document.createElement('option');
     opt.value = value;
     opt.textContent = name;
@@ -206,11 +213,16 @@ function startWorker() {
         els.view.disabled = false;
         els.save.disabled = false;
         els.download.disabled = false;
+        els.downloadAll.disabled = false;
         els.statOcean.textContent = `${(msg.oceanFraction * 100).toFixed(0)}%`;
         renderBiomeCounts(msg.biomeCounts);
         setStatus(`World complete in ${(totalMs / 1000).toFixed(1)} s. Pick a view to explore it.`);
         // Show the view the selector is on.
-        requestView(is3D(els.view.value) ? els.view.value : Number(els.view.value));
+        requestView(
+          is3D(els.view.value) || isStyled(els.view.value)
+            ? els.view.value
+            : Number(els.view.value),
+        );
         break;
 
       case 'saved': {
@@ -245,6 +257,7 @@ function startWorker() {
         els.view.disabled = false;
         els.save.disabled = false;
         els.download.disabled = false;
+        els.downloadAll.disabled = false;
         setStatus(`Loaded ${msg.name} (${msg.width}×${msg.height}).`);
         const first = msg.available.includes(7) ? 7 : (msg.available[0] ?? 1);
         els.view.value = String(first);
@@ -253,6 +266,12 @@ function startWorker() {
         break;
       }
 
+      case 'chartData':
+        els.canvas.classList.remove('busy');
+        chartData = msg;
+        drawStyled();
+        break;
+
       case 'elevation':
         lastElevation = msg;
         drawView3D();
@@ -260,6 +279,12 @@ function startWorker() {
 
       case 'render':
         els.canvas.classList.remove('busy');
+        if (pendingRender) {
+          const resolve = pendingRender;
+          pendingRender = null;
+          resolve(msg);
+          break;
+        }
         if (is3D(els.view.value)) {
           if (view3d) {
             view3d.setDrape(new Uint8Array(msg.buffer), msg.width, msg.height);
@@ -275,6 +300,12 @@ function startWorker() {
 
       case 'unavailable':
         els.canvas.classList.remove('busy');
+        if (pendingRender) {
+          const resolve = pendingRender;
+          pendingRender = null;
+          resolve(null);
+          break;
+        }
         setStatus(
           `${VIEWS.find((v) => v.id === msg.view)?.name ?? 'That view'} is not available yet — it needs a later phase.`,
         );
@@ -298,6 +329,9 @@ function startWorker() {
 
 function viewName(view) {
   const [, id] = String(view).split(':');
+  if (isStyled(view)) {
+    return VIEWS_STYLED.find(([k]) => k === view)[1];
+  }
   if (is3D(view)) {
     return VIEWS_3D.find(([v]) => v === view)?.[1] ?? 'Terrain (3D)';
   }
@@ -310,6 +344,12 @@ function requestView(view) {
   // 4096x2048 and looked like a hang.
   setStatus(`Rendering ${viewName(view)}\u2026`);
   els.canvas.classList.add('busy');
+  if (isStyled(view)) {
+    show3D(false);
+    if (chartData) drawStyled();
+    else worker.postMessage({ type: 'chartData' });
+    return;
+  }
   if (is3D(view)) {
     show3D(true);
     // The elevation is fetched once per generated world and cached.
@@ -326,6 +366,26 @@ function requestView(view) {
 let view3d = null;
 let view3dFailed = false;
 let lastElevation = null;
+let chartData = null;
+let pendingRender = null;
+
+/// The drawn charts are stylised, not data views: they are rendered at a
+/// readable presentation size rather than at the world's resolution, which for
+/// a 4096-wide world would put every glyph at a couple of pixels.
+const CHART_MAX_WIDTH = 1800;
+
+function drawStyled() {
+  if (!chartData) return;
+  const aspect = chartData.height / chartData.width;
+  const cw = Math.min(CHART_MAX_WIDTH, chartData.width);
+  const ch = Math.round(cw * aspect);
+  els.canvas.width = cw;
+  els.canvas.height = ch;
+  const c = els.canvas.getContext('2d');
+  c.clearRect(0, 0, cw, ch);
+  drawFantasyChart(c, { ...chartData, name: chartData.seed, seed: els.seed.value }, cw, ch);
+  setStatus(`Showing ${viewName(els.view.value)}.`);
+}
 
 /// Same hypsometric ramp the plate-tectonics demo uses, keyed off quantiles.
 const TERRAIN_STOPS_3D = [
@@ -404,6 +464,7 @@ function markViewsAvailable(available) {
 function generate() {
   if (running) return;
   lastElevation = null;
+  chartData = null;
   resetPan();
 
   let params;
@@ -431,6 +492,7 @@ function generate() {
   loadedFromFile = false;
   els.save.disabled = true;
   els.download.disabled = true;
+  els.downloadAll.disabled = true;
   buildViewList();
   buildPhaseList();
   markPhase(0, 'active');
@@ -472,7 +534,8 @@ els.randomSeed.addEventListener('click', () => {
   els.seed.value = Math.floor(Math.random() * 2 ** 31);
 });
 els.view.addEventListener('change', () => {
-  pinnedView = is3D(els.view.value) ? els.view.value : Number(els.view.value);
+  pinnedView =
+    is3D(els.view.value) || isStyled(els.view.value) ? els.view.value : Number(els.view.value);
   requestView(pinnedView);
 });
 
@@ -605,4 +668,86 @@ els.download.addEventListener('click', () => {
     URL.revokeObjectURL(url);
     setStatus(`Saved ${a.download}.`);
   }, 'image/png');
+});
+
+
+// --- Download every map as a zip -------------------------------------------
+
+function slug(text) {
+  return text.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+}
+
+/// Ask the worker for one view and hand back the frame, or null if the world
+/// has no layers for it.
+function renderOnce(view) {
+  return new Promise((resolve) => {
+    pendingRender = resolve;
+    worker.postMessage({ type: 'render', view });
+  });
+}
+
+function canvasToBytes(canvas) {
+  return new Promise((resolve) => {
+    canvas.toBlob(async (blob) => resolve(new Uint8Array(await blob.arrayBuffer())), 'image/png');
+  });
+}
+
+els.downloadAll.addEventListener('click', async () => {
+  if (running) return;
+  const seed = Math.max(0, Number(els.seed.value) | 0);
+  els.downloadAll.disabled = true;
+  const scratch = document.createElement('canvas');
+  const sctx = scratch.getContext('2d');
+  const files = [];
+
+  try {
+    for (const v of VIEWS) {
+      setStatus(`Rendering ${v.name} for the archive\u2026`);
+      const frame = await renderOnce(v.id);
+      if (!frame) continue; // a layer this world does not have
+      scratch.width = frame.width;
+      scratch.height = frame.height;
+      sctx.putImageData(
+        new ImageData(new Uint8ClampedArray(frame.buffer), frame.width, frame.height),
+        0,
+        0,
+      );
+      files.push({ name: `${seed}_${slug(v.name)}.png`, data: await canvasToBytes(scratch) });
+    }
+
+    // The drawn styles are rendered here rather than in the worker.
+    if (chartData) {
+      for (const [key, name] of VIEWS_STYLED) {
+        setStatus(`Rendering ${name} for the archive\u2026`);
+        const aspect = chartData.height / chartData.width;
+        scratch.width = Math.min(CHART_MAX_WIDTH, chartData.width);
+        scratch.height = Math.round(scratch.width * aspect);
+        sctx.clearRect(0, 0, scratch.width, scratch.height);
+        if (key === 'fantasy') {
+          drawFantasyChart(
+            sctx,
+            { ...chartData, name: chartData.seed, seed },
+            scratch.width,
+            scratch.height,
+          );
+        }
+        files.push({ name: `${seed}_${slug(name)}.png`, data: await canvasToBytes(scratch) });
+      }
+    }
+
+    const blob = zipStore(files);
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${seed}_maps.zip`;
+    a.click();
+    URL.revokeObjectURL(url);
+    setStatus(`Saved ${a.download} with ${files.length} maps.`);
+  } catch (e) {
+    setStatus(`Could not build the archive: ${e.message ?? e}`, true);
+  } finally {
+    els.downloadAll.disabled = false;
+    // Put the view the user was on back on screen.
+    requestView(pinnedView);
+  }
 });

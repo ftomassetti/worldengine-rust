@@ -202,7 +202,6 @@
       <div class="buttons">
         <button id="save" disabled title="Write a worldengine .world file">Save .world</button>
         <button id="load" title="Open a worldengine .world file">Load .world…</button>
-        <button id="download" disabled title="Save the map you are looking at as a PNG">Download PNG</button>
         <input id="loadInput" type="file" accept=".world,application/octet-stream" hidden>
       </div>
       <p class="hint" style="margin-top:6px">`.world` files use worldengine's own protobuf format, so they interchange with the Python tool.</p>
@@ -224,6 +223,10 @@
     </div>
     <div class="canvas-wrap"><canvas id="canvas" width="256" height="128"></canvas>
       <canvas id="canvas3d" hidden></canvas></div>
+    <div class="buttons" style="margin-top:10px">
+      <button id="download" disabled title="Save the map you are looking at as a PNG">Download PNG</button>
+      <button id="downloadAll" disabled title="Save every available map as a zip">Download all maps (zip)</button>
+    </div>
     <div class="status" id="status">Loading WebAssembly module…</div>
   </div>
 
