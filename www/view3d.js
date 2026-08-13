@@ -24,6 +24,7 @@ uniform mat4 uMvp;
 
 out float vHeight;
 out vec3 vNormal;
+out vec2 vUv;
 
 float sampleH(ivec2 c) {
   return texelFetch(uHeight, clamp(c, ivec2(0), uTexSize - 1), 0).r;
@@ -65,6 +66,7 @@ void main() {
   vNormal = normalize(cross(dz, dx));
 
   vHeight = sampleH(c);
+  vUv = aUv;
   vec3 pos = vec3((aUv.x - 0.5) * uExtent.x, ec, (aUv.y - 0.5) * uExtent.y);
   gl_Position = uMvp * vec4(pos, 1.0);
 }`;
@@ -74,6 +76,7 @@ precision highp float;
 
 in float vHeight;
 in vec3 vNormal;
+in vec2 vUv;
 
 uniform float uQ[7];       // quantile thresholds
 uniform vec3 uFrom[7];     // ramp band start colours, 0-255
@@ -82,22 +85,31 @@ uniform float uMin;
 uniform float uSeaRef;
 uniform vec3 uLight;
 uniform vec3 uEye;
+uniform sampler2D uDrape;   // a rendered 2D map, draped over the relief
+uniform bool uUseDrape;
 
 out vec4 outColor;
 
 void main() {
-  vec3 col = uTo[6];
-  float lo = uMin;
-  for (int i = 0; i < 7; i++) {
-    if (vHeight < uQ[i] || i == 6) {
-      float d = uQ[i] - lo;
-      float t = d > 0.0 ? clamp((vHeight - lo) / d, 0.0, 1.0) : 0.0;
-      col = mix(uFrom[i], uTo[i], t);
-      break;
+  vec3 col;
+  if (uUseDrape) {
+    // The map is already in sRGB-ish display values; bring it to linear-ish so
+    // the lighting below does not wash it out.
+    col = pow(texture(uDrape, vUv).rgb, vec3(2.2));
+  } else {
+    col = uTo[6];
+    float lo = uMin;
+    for (int i = 0; i < 7; i++) {
+      if (vHeight < uQ[i] || i == 6) {
+        float d = uQ[i] - lo;
+        float t = d > 0.0 ? clamp((vHeight - lo) / d, 0.0, 1.0) : 0.0;
+        col = mix(uFrom[i], uTo[i], t);
+        break;
+      }
+      lo = uQ[i];
     }
-    lo = uQ[i];
+    col /= 255.0;
   }
-  col /= 255.0;
 
   vec3 n = normalize(vNormal);
   vec3 l = normalize(uLight);
@@ -113,7 +125,15 @@ void main() {
   vec3 ground = vec3(0.26, 0.22, 0.18);
   vec3 fill = mix(ground, sky, clamp(n.y * 0.5 + 0.5, 0.0, 1.0));
 
-  vec3 lit = col * (0.42 * fill + 1.05 * key * vec3(1.0, 0.96, 0.88));
+  // A draped map already carries its own colour, so light it close to
+  // neutrally: tinting it the way the height ramp is tinted turns a satellite
+  // image muddy. Shading still comes through as relief.
+  vec3 keyTint = uUseDrape ? vec3(1.0, 0.99, 0.97) : vec3(1.0, 0.96, 0.88);
+  vec3 fillMix = uUseDrape ? mix(vec3(0.55), fill, 0.35) : fill;
+  float fillAmt = uUseDrape ? 0.62 : 0.42;
+  float keyAmt = uUseDrape ? 0.72 : 1.05;
+
+  vec3 lit = col * (fillAmt * fillMix + keyAmt * key * keyTint);
 
   // A little sheen on water, which is otherwise a dead flat sheet.
   if (vHeight < uSeaRef) {
@@ -121,7 +141,8 @@ void main() {
     lit += vec3(0.16, 0.20, 0.24) * pow(max(dot(n, h), 0.0), 48.0);
   }
 
-  outColor = vec4(pow(clamp(lit, 0.0, 1.0), vec3(1.0 / 1.06)), 1.0);
+  float gamma = uUseDrape ? 2.2 : 1.06;
+  outColor = vec4(pow(clamp(lit, 0.0, 1.0), vec3(1.0 / gamma)), 1.0);
 }`;
 
 function compile(gl, type, src) {
@@ -178,9 +199,11 @@ function norm(v) {
   return [v[0] / l, v[1] / l, v[2] / l];
 }
 
-/// The grid is capped so that a 2048-wide world does not ask for 4M vertices;
-/// the height texture stays full resolution either way.
-const MAX_GRID = 512;
+/// The grid is capped so that a 4096-wide world does not ask for 8M vertices;
+/// the height texture stays full resolution either way. 1024 along the long
+/// axis is about half a million vertices, which is what zooming in needs before
+/// the geometry starts to look faceted.
+const MAX_GRID = 1024;
 
 export function createTerrainView3D(canvas) {
   const gl = canvas.getContext('webgl2', { antialias: true, depth: true });
@@ -200,12 +223,15 @@ export function createTerrainView3D(canvas) {
     seaRef: u('uSeaRef'), exag: u('uExag'), oceanExag: u('uOceanExag'),
     mvp: u('uMvp'), q: u('uQ[0]'), from: u('uFrom[0]'), to: u('uTo[0]'),
     min: u('uMin'), light: u('uLight'), knee: u('uKnee'), eye: u('uEye'),
+    drape: u('uDrape'), useDrape: u('uUseDrape'),
   };
 
   const vao = gl.createVertexArray();
   const vbo = gl.createBuffer();
   const ibo = gl.createBuffer();
   let texture = null;
+  let drapeTex = null;
+  let drapeSize = [0, 0];
 
   /// `texStorage2D` allocates *immutable* storage, so a texture cannot be
   /// resized: calling it a second time fails and leaves the old, smaller
@@ -298,7 +324,7 @@ export function createTerrainView3D(canvas) {
       camera.distance * cp * Math.cos(camera.yaw),
     ];
     const view = lookAt(eye, [0, 0, 0], [0, 1, 0]);
-    const proj = perspective(45, canvas.width / canvas.height, 0.05, 50);
+    const proj = perspective(45, canvas.width / canvas.height, 0.01, 60);
 
     gl.useProgram(program);
     gl.uniformMatrix4fv(loc.mvp, false, multiply(proj, view));
@@ -318,6 +344,11 @@ export function createTerrainView3D(canvas) {
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, texture);
     gl.uniform1i(loc.height, 0);
+
+    gl.uniform1i(loc.useDrape, drapeTex ? 1 : 0);
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, drapeTex ?? texture);
+    gl.uniform1i(loc.drape, 1);
 
     gl.bindVertexArray(vao);
     gl.drawElements(gl.TRIANGLES, indexCount, gl.UNSIGNED_INT, 0);
@@ -346,7 +377,9 @@ export function createTerrainView3D(canvas) {
   canvas.addEventListener('pointercancel', endDrag);
   canvas.addEventListener('wheel', (e) => {
     e.preventDefault();
-    camera.distance = Math.min(9, Math.max(1.1, camera.distance * (1 + Math.sign(e.deltaY) * 0.1)));
+    // Wide range: the map is two units across, so getting close enough to read
+    // a coastline means going well under one.
+    camera.distance = Math.min(24, Math.max(0.12, camera.distance * (1 + Math.sign(e.deltaY) * 0.12)));
     redraw();
   }, { passive: false });
 
@@ -406,6 +439,33 @@ export function createTerrainView3D(canvas) {
         spinHandle = requestAnimationFrame(tick);
       };
       spinHandle = requestAnimationFrame(tick);
+    },
+
+    /// Drape a rendered 2D map over the relief instead of colouring by height.
+    /// `rgba` is a tightly packed RGBA8 image; pass null to go back to the ramp.
+    setDrape(rgba, w, h) {
+      if (!rgba) {
+        if (drapeTex) {
+          gl.deleteTexture(drapeTex);
+          drapeTex = null;
+        }
+        redraw();
+        return;
+      }
+      if (!drapeTex || drapeSize[0] !== w || drapeSize[1] !== h) {
+        if (drapeTex) gl.deleteTexture(drapeTex);
+        drapeTex = gl.createTexture();
+        drapeSize = [w, h];
+        gl.bindTexture(gl.TEXTURE_2D, drapeTex);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+        gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA8, w, h);
+      }
+      gl.bindTexture(gl.TEXTURE_2D, drapeTex);
+      gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, rgba);
+      redraw();
     },
 
     setExaggeration(value) {

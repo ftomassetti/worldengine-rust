@@ -90,17 +90,27 @@ pub fn place_oceans_at_map_borders(world: &mut World) {
 
 pub fn add_noise_to_elevation(world: &mut World, seed: u32) {
     let octaves = 8;
-    let freq = 16.0 * octaves as f64;
     let (width, height) = (world.width, world.height);
+
+    // The wavelength is a fraction of the map, not a fixed number of pixels.
+    //
+    // At a fixed pixel frequency the noise covers a quarter of a 256-wide world
+    // — continental undulation — but only 1/64 of a 4096-wide one, which is
+    // pixel-scale speckle. Its amplitude is around 1 against an ocean floor
+    // sitting at 0.1 to 1.0 with sea level at 1.0, so at large sizes it lifts
+    // scattered ocean cells over the line and fills the sea with confetti
+    // islands, while roughening every mountain.
+    //
+    // Scaling by the width keeps the pattern the same shape at any resolution.
+    // The constant reproduces the previous behaviour at 256 wide, which is the
+    // size it was tuned at. Both axes use the same factor, so the noise stays
+    // isotropic rather than stretching with the aspect ratio.
+    let scale = 4.0 / width as f64;
+
     let data = &mut world.elevation.as_mut().unwrap().data;
     for y in 0..height {
         for x in 0..width {
-            let n = snoise2(
-                x as f64 / freq * 2.0,
-                y as f64 / freq * 2.0,
-                octaves,
-                seed as f32,
-            );
+            let n = snoise2(x as f64 * scale, y as f64 * scale, octaves, seed as f32);
             data[(y, x)] += n as f64;
         }
     }

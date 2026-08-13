@@ -32,6 +32,16 @@ const PHASES = [
   'Watermap', 'Irrigation', 'Humidity', 'Permeability', 'Biomes', 'Ice caps',
 ];
 
+/// The 3D entries, as `[select value, label]`. `3d:<id>` drapes that 2D map
+/// over the relief; plain `3d` uses the height ramp.
+const VIEWS_3D = [
+  ['3d', 'Terrain (3D)'],
+  ['3d:6', 'Biome (3D)'],
+  ['3d:7', 'Satellite (3D)'],
+];
+
+const is3D = (v) => typeof v === 'string' && v.startsWith('3d');
+
 const VIEWS = [
   { id: 0, name: 'Plates' },
   { id: 1, name: 'Elevation' },
@@ -95,10 +105,14 @@ function buildViewList() {
     opt.textContent = v.name;
     els.view.appendChild(opt);
   }
-  const opt3d = document.createElement('option');
-  opt3d.value = '3d';
-  opt3d.textContent = 'Terrain (3D)';
-  els.view.appendChild(opt3d);
+  // The 3D views. `3d` colours by its own height ramp; `3d:<id>` drapes the
+  // given 2D map over the relief.
+  for (const [value, name] of VIEWS_3D) {
+    const opt = document.createElement('option');
+    opt.value = value;
+    opt.textContent = name;
+    els.view.appendChild(opt);
+  }
   els.view.value = '7'; // Satellite, once it is available.
 }
 
@@ -194,7 +208,7 @@ function startWorker() {
         renderBiomeCounts(msg.biomeCounts);
         setStatus(`World complete in ${(totalMs / 1000).toFixed(1)} s. Pick a view to explore it.`);
         // Show the view the selector is on.
-        requestView(els.view.value === '3d' ? '3d' : Number(els.view.value));
+        requestView(is3D(els.view.value) ? els.view.value : Number(els.view.value));
         break;
 
       case 'saved': {
@@ -242,11 +256,22 @@ function startWorker() {
         break;
 
       case 'render':
+        els.canvas.classList.remove('busy');
+        if (is3D(els.view.value)) {
+          if (view3d) {
+            view3d.setDrape(new Uint8Array(msg.buffer), msg.width, msg.height);
+            setStatus(
+              `Showing Terrain (3D), coloured by ${VIEWS.find((v) => v.id === msg.view)?.name ?? 'map'}.`,
+            );
+          }
+          break;
+        }
         paint(msg);
         setStatus(`Showing ${VIEWS.find((v) => v.id === msg.view)?.name ?? 'map'}.`);
         break;
 
       case 'unavailable':
+        els.canvas.classList.remove('busy');
         setStatus(
           `${VIEWS.find((v) => v.id === msg.view)?.name ?? 'That view'} is not available yet — it needs a later phase.`,
         );
@@ -268,8 +293,21 @@ function startWorker() {
   };
 }
 
+function viewName(view) {
+  const [, id] = String(view).split(':');
+  if (is3D(view)) {
+    return VIEWS_3D.find(([v]) => v === view)?.[1] ?? 'Terrain (3D)';
+  }
+  return VIEWS.find((v) => v.id === Number(id ?? view))?.name ?? 'map';
+}
+
 function requestView(view) {
-  if (view === '3d') {
+  // The worker renders synchronously, so this is the last chance to say
+  // anything before it stops answering. The ancient map takes seconds at
+  // 4096x2048 and looked like a hang.
+  setStatus(`Rendering ${viewName(view)}\u2026`);
+  els.canvas.classList.add('busy');
+  if (is3D(view)) {
     show3D(true);
     // The elevation is fetched once per generated world and cached.
     if (lastElevation) drawView3D();
@@ -332,7 +370,20 @@ function drawView3D() {
   for (const v of data) if (v < min) min = v;
   const qs = quantilesOf(data, TERRAIN_STOPS_3D.map((s) => s.q));
   view3d.draw(data, width, height, qs, min, seaLevel, Number(els.exag.value));
-  setStatus('Showing Terrain (3D). Drag to rotate, scroll to zoom.');
+  applyDrape();
+}
+
+/// Colour the relief by the 2D map the current 3D entry names, or by its own
+/// height ramp.
+function applyDrape() {
+  if (!view3d) return;
+  const [, id] = els.view.value.split(':');
+  if (id === undefined) {
+    view3d.setDrape(null);
+    setStatus('Showing Terrain (3D). Drag to rotate, scroll to zoom.');
+    return;
+  }
+  worker.postMessage({ type: 'render', view: Number(id) });
 }
 
 /// Grey out the views a loaded world has no layers for.
@@ -350,6 +401,7 @@ function markViewsAvailable(available) {
 function generate() {
   if (running) return;
   lastElevation = null;
+  resetPan();
 
   let params;
   try {
@@ -416,7 +468,7 @@ els.randomSeed.addEventListener('click', () => {
   els.seed.value = Math.floor(Math.random() * 2 ** 31);
 });
 els.view.addEventListener('change', () => {
-  pinnedView = els.view.value === '3d' ? '3d' : Number(els.view.value);
+  pinnedView = is3D(els.view.value) ? els.view.value : Number(els.view.value);
   requestView(pinnedView);
 });
 
@@ -454,5 +506,68 @@ els.exag.addEventListener('input', () => {
   if (view3d) view3d.setExaggeration(Number(els.exag.value));
 });
 window.addEventListener('resize', () => {
-  if (view3d && els.view.value === '3d') view3d.resize();
+  if (view3d && is3D(els.view.value)) view3d.resize();
 });
+
+
+// --- Zoom and pan for the 2D maps ------------------------------------------
+//
+// The canvas is kept at the map's pixel size and moved with a CSS transform,
+// so zooming costs nothing per frame and stays crisp at any magnification.
+
+const pan = { scale: 1, x: 0, y: 0 };
+
+function applyPan() {
+  els.canvas.style.transformOrigin = '0 0';
+  els.canvas.style.transform = `translate(${pan.x}px, ${pan.y}px) scale(${pan.scale})`;
+}
+
+function resetPan() {
+  pan.scale = 1;
+  pan.x = 0;
+  pan.y = 0;
+  applyPan();
+}
+
+els.canvas.parentElement.addEventListener(
+  'wheel',
+  (e) => {
+    if (is3D(els.view.value)) return; // the 3D view has its own controls
+    e.preventDefault();
+    const rect = els.canvas.getBoundingClientRect();
+    const cx = e.clientX - rect.left;
+    const cy = e.clientY - rect.top;
+    const factor = e.deltaY < 0 ? 1.15 : 1 / 1.15;
+    const next = Math.min(40, Math.max(1, pan.scale * factor));
+    const applied = next / pan.scale;
+    // Keep whatever is under the cursor under the cursor.
+    pan.x -= cx * (applied - 1);
+    pan.y -= cy * (applied - 1);
+    pan.scale = next;
+    if (pan.scale === 1) {
+      pan.x = 0;
+      pan.y = 0;
+    }
+    applyPan();
+  },
+  { passive: false },
+);
+
+let panning = null;
+els.canvas.parentElement.addEventListener('pointerdown', (e) => {
+  if (is3D(els.view.value) || pan.scale === 1) return;
+  panning = { x: e.clientX - pan.x, y: e.clientY - pan.y };
+  els.canvas.parentElement.setPointerCapture(e.pointerId);
+});
+els.canvas.parentElement.addEventListener('pointermove', (e) => {
+  if (!panning) return;
+  pan.x = e.clientX - panning.x;
+  pan.y = e.clientY - panning.y;
+  applyPan();
+});
+for (const ev of ['pointerup', 'pointercancel']) {
+  els.canvas.parentElement.addEventListener(ev, () => {
+    panning = null;
+  });
+}
+els.canvas.addEventListener('dblclick', resetPan);

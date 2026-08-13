@@ -146,6 +146,8 @@
   ul.biomes li .n { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   ul.biomes li .c { font-variant-numeric: tabular-nums; color: var(--text); }
   canvas[hidden] { display: none; }
+  canvas.busy { opacity: .45; transition: opacity .12s; }
+  .canvas-wrap { overflow: hidden; }
   #controls3d[hidden] { display: none; }
   #controls3d { display: inline-flex; gap: 12px; align-items: center; }
   #controls3d input[type=range] { width: 110px; }
@@ -214,7 +216,7 @@
       </label>
       <span id="controls3d" hidden>
         <label>Relief
-          <input id="exag" type="range" min="0.005" max="0.12" step="0.005" value="0.01">
+          <input id="exag" type="range" min="0.002" max="0.06" step="0.002" value="0.006">
         </label>
         <span class="hint">drag to rotate · scroll to zoom</span>
       </span>
