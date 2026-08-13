@@ -13,14 +13,17 @@
   publish = "www"
   command = """
     set -e
-    if ! command -v rustup >/dev/null; then
+    # The build image may already carry Rust; install only what is missing.
+    if ! command -v rustup >/dev/null 2>&1; then
       curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
     fi
     [ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env" || true
+    export PATH="$HOME/.cargo/bin:$PATH"
     rustup target add wasm32-unknown-unknown
-    if ! command -v wasm-pack >/dev/null; then
-      curl -sSf https://rustwasm.github.io/wasm-pack/installer/init.sh | sh
-    fi
+    # `cargo install` rather than the wasm-pack installer script: it puts the
+    # binary in $HOME/.cargo/bin, which the build user owns, where the script
+    # writes to a system directory it may not.
+    command -v wasm-pack >/dev/null 2>&1 || cargo install wasm-pack --locked
     wasm-pack build worldengine-wasm --target web --out-dir ../www/pkg --release
   """
 
