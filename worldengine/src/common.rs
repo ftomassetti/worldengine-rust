@@ -50,6 +50,21 @@ impl Counter {
 /// The convolution reverses the kernel; every kernel used here is symmetric, so
 /// the reversal is invisible, but the accumulation order is not: it runs over
 /// the window left to right, which is what numpy's small-array path does.
+/// `convolve_valid` into a caller-owned buffer, so the hot paths can reuse one.
+fn convolve_valid_into(a: &[f64], kernel: &[f64], out: &mut [f64]) {
+    let k = kernel.len();
+    let n = a.len();
+    debug_assert!(n >= k && out.len() >= n - k + 1);
+    for i in 0..=(n - k) {
+        let mut acc = 0.0;
+        for (j, kv) in kernel.iter().enumerate() {
+            acc += a[i + j] * kv;
+        }
+        out[i] = acc;
+    }
+}
+
+#[allow(dead_code)]
 fn convolve_valid(a: &[f64], kernel: &[f64]) -> Vec<f64> {
     let k = kernel.len();
     let n = a.len();
@@ -106,18 +121,30 @@ pub fn anti_alias(map_in: &Matrix<f64>, steps: usize) -> Matrix<f64> {
     let w = -1.0 / 3.0f64.sqrt();
     let kernel = [w, w, w];
 
-    let mut current = map_in.clone();
+    let pw = width + 2;
+    let ph = height + 2;
+
+    // Buffers live across the steps. Allocating them per step meant a
+    // (h+2)x(w+2) array of f64 every time — 67 MB per step on a 4096x2048 world
+    // — plus a Vec per row and per column, which for the columns is four
+    // thousand allocations a step.
+    let mut padded = vec![0.0f64; pw * ph];
+    let mut line = vec![0.0f64; ph.max(pw)];
+    let mut conv = vec![0.0f64; ph.max(pw)];
+    let mut current = map_in.as_slice().to_vec();
+
+    // Column-major work is done a block at a time: gathering one column at a
+    // time walks memory with a stride of `pw`, which misses the cache on every
+    // read. A block of columns is gathered with sequential row reads and then
+    // fits in L2, so the convolution runs over hot memory. The arithmetic and
+    // its order are unchanged, so results are identical.
+    const BLOCK: usize = 64;
+    let mut block = vec![0.0f64; BLOCK * ph];
 
     for _ in 0..steps {
-        // Build the wrap-padded (height+2) x (width+2) working array. The
-        // Python appends row 0 / column 0 at the end and inserts the original
-        // last row / column at the front; the result is plain circular padding.
-        let pw = width + 2;
-        let ph = height + 2;
-        let mut padded = vec![0.0f64; pw * ph];
+        // Circular padding, scaled: row 0 is the original last row, row h+1 the
+        // original first, and likewise for the columns.
         for py in 0..ph {
-            // padded row 0 <- original last row, rows 1..=height <- 0..height-1,
-            // row height+1 <- original row 0.
             let sy = if py == 0 {
                 height - 1
             } else if py == ph - 1 {
@@ -125,49 +152,59 @@ pub fn anti_alias(map_in: &Matrix<f64>, steps: usize) -> Matrix<f64> {
             } else {
                 py - 1
             };
-            for px in 0..pw {
-                let sx = if px == 0 {
-                    width - 1
-                } else if px == pw - 1 {
-                    0
-                } else {
-                    px - 1
-                };
-                padded[py * pw + px] = current[(sy, sx)] * (3.0 / 11.0);
-            }
-        }
-
-        // Convolve the rows first...
-        for py in 0..ph {
-            let row: Vec<f64> = padded[py * pw..(py + 1) * pw].to_vec();
-            let conv = convolve_valid(&row, &kernel);
-            for (i, v) in conv.into_iter().enumerate() {
-                padded[py * pw + 1 + i] = v;
-            }
-        }
-
-        // ...and then the columns. Note this reads the row-pass results,
-        // including the untouched boundary columns — that in-place dependency
-        // is part of the original behaviour.
-        for px in 0..pw {
-            let col: Vec<f64> = (0..ph).map(|py| padded[py * pw + px]).collect();
-            let conv = convolve_valid(&col, &kernel);
-            for (i, v) in conv.into_iter().enumerate() {
-                padded[(1 + i) * pw + px] = v;
-            }
-        }
-
-        // Throw away the invalid boundary values and add the retained part.
-        let mut next = Matrix::new(width, height);
-        for y in 0..height {
+            let src = &current[sy * width..(sy + 1) * width];
+            let dst = &mut padded[py * pw..(py + 1) * pw];
+            dst[0] = src[width - 1] * (3.0 / 11.0);
             for x in 0..width {
-                next[(y, x)] = padded[(y + 1) * pw + (x + 1)] + map_part[y * width + x];
+                dst[x + 1] = src[x] * (3.0 / 11.0);
+            }
+            dst[pw - 1] = src[0] * (3.0 / 11.0);
+        }
+
+        // Rows.
+        for py in 0..ph {
+            let row = &padded[py * pw..(py + 1) * pw];
+            line[..pw].copy_from_slice(row);
+            convolve_valid_into(&line[..pw], &kernel, &mut conv[..width]);
+            padded[py * pw + 1..py * pw + 1 + width].copy_from_slice(&conv[..width]);
+        }
+
+        // Columns, in blocks.
+        let mut c0 = 0;
+        while c0 < pw {
+            let cols = BLOCK.min(pw - c0);
+            for py in 0..ph {
+                let src = &padded[py * pw + c0..py * pw + c0 + cols];
+                block[py * BLOCK..py * BLOCK + cols].copy_from_slice(src);
+            }
+            for j in 0..cols {
+                for py in 0..ph {
+                    line[py] = block[py * BLOCK + j];
+                }
+                convolve_valid_into(&line[..ph], &kernel, &mut conv[..height]);
+                for (i, v) in conv[..height].iter().enumerate() {
+                    block[(1 + i) * BLOCK + j] = *v;
+                }
+            }
+            for py in 0..ph {
+                let dst = &mut padded[py * pw + c0..py * pw + c0 + cols];
+                dst.copy_from_slice(&block[py * BLOCK..py * BLOCK + cols]);
+            }
+            c0 += cols;
+        }
+
+        // Drop the padding and add back the retained part of the original.
+        for y in 0..height {
+            let row = &padded[(y + 1) * pw + 1..(y + 1) * pw + 1 + width];
+            let part = &map_part[y * width..(y + 1) * width];
+            let out = &mut current[y * width..(y + 1) * width];
+            for x in 0..width {
+                out[x] = row[x] + part[x];
             }
         }
-        current = next;
     }
 
-    current
+    Matrix::from_vec(current, width, height)
 }
 
 /// Count how many neighbours of a coordinate are set to one.

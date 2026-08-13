@@ -121,40 +121,37 @@ pub fn fill_ocean(elevation: &Matrix<f64>, sea_level: f64) -> Matrix<bool> {
     let (height, width) = elevation.shape();
 
     let mut ocean = Matrix::<bool>::new(width, height);
-    let mut to_expand: Vec<(usize, usize)> = Vec::new();
+    // Cells are marked as they are queued rather than as they are taken off.
+    // Marking on removal let every cell be queued once per neighbour that
+    // reached it — up to eight times — so the queue grew to tens of millions of
+    // entries on a large world. The order in which cells are first queued, and
+    // so the set that ends up flooded, is unchanged.
+    let mut to_expand: Vec<u32> = Vec::new();
+    let mut push = |ocean: &mut Matrix<bool>, q: &mut Vec<u32>, x: usize, y: usize| {
+        if !ocean[(y, x)] && elevation[(y, x)] <= sea_level {
+            ocean[(y, x)] = true;
+            q.push((y * width + x) as u32);
+        }
+    };
 
     for x in 0..width {
         // Top and bottom borders.
-        if elevation[(0, x)] <= sea_level {
-            to_expand.push((x, 0));
-        }
-        if elevation[(height - 1, x)] <= sea_level {
-            to_expand.push((x, height - 1));
-        }
+        push(&mut ocean, &mut to_expand, x, 0);
+        push(&mut ocean, &mut to_expand, x, height - 1);
     }
     for y in 0..height {
         // Left and right borders.
-        if elevation[(y, 0)] <= sea_level {
-            to_expand.push((0, y));
-        }
-        if elevation[(y, width - 1)] <= sea_level {
-            to_expand.push((width - 1, y));
-        }
+        push(&mut ocean, &mut to_expand, 0, y);
+        push(&mut ocean, &mut to_expand, width - 1, y);
     }
 
-    // The Python appends to the list while iterating it, i.e. a breadth-first
-    // expansion over a growing queue.
     let mut i = 0;
     while i < to_expand.len() {
-        let (tx, ty) = to_expand[i];
+        let idx = to_expand[i] as usize;
         i += 1;
-        if !ocean[(ty, tx)] {
-            ocean[(ty, tx)] = true;
-            for (px, py) in around(tx, ty, width, height) {
-                if !ocean[(py, px)] && elevation[(py, px)] <= sea_level {
-                    to_expand.push((px, py));
-                }
-            }
+        let (tx, ty) = (idx % width, idx / width);
+        for (px, py) in around(tx, ty, width, height) {
+            push(&mut ocean, &mut to_expand, px, py);
         }
     }
 
