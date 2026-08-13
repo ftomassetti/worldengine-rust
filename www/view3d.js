@@ -206,7 +206,13 @@ function norm(v) {
 const MAX_GRID = 1024;
 
 export function createTerrainView3D(canvas) {
-  const gl = canvas.getContext('webgl2', { antialias: true, depth: true });
+  // `preserveDrawingBuffer` so the canvas can be read back for a download;
+  // without it the buffer is undefined once the frame is presented.
+  const gl = canvas.getContext('webgl2', {
+    antialias: true,
+    depth: true,
+    preserveDrawingBuffer: true,
+  });
   if (!gl) return null;
 
   const program = gl.createProgram();

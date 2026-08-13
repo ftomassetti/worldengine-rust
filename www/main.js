@@ -11,6 +11,7 @@ const els = {
   seed: $('seed'), width: $('width'), height: $('height'), numPlates: $('numPlates'),
   plateExpansion: $('plateExpansion'), plateSizeHint: $('plateSizeHint'),
   canvas3d: $('canvas3d'), controls3d: $('controls3d'), exag: $('exag'),
+  download: $('download'),
   oceanLevel: $('oceanLevel'), gammaCurve: $('gammaCurve'), curveOffset: $('curveOffset'),
   fadeBorders: $('fadeBorders'), temps: $('temps'), humids: $('humids'),
   generate: $('generate'), randomSeed: $('randomSeed'),
@@ -204,6 +205,7 @@ function startWorker() {
         setBusy(false);
         els.view.disabled = false;
         els.save.disabled = false;
+        els.download.disabled = false;
         els.statOcean.textContent = `${(msg.oceanFraction * 100).toFixed(0)}%`;
         renderBiomeCounts(msg.biomeCounts);
         setStatus(`World complete in ${(totalMs / 1000).toFixed(1)} s. Pick a view to explore it.`);
@@ -242,6 +244,7 @@ function startWorker() {
         markViewsAvailable(msg.available);
         els.view.disabled = false;
         els.save.disabled = false;
+        els.download.disabled = false;
         setStatus(`Loaded ${msg.name} (${msg.width}×${msg.height}).`);
         const first = msg.available.includes(7) ? 7 : (msg.available[0] ?? 1);
         els.view.value = String(first);
@@ -427,6 +430,7 @@ function generate() {
   pinnedView = null;
   loadedFromFile = false;
   els.save.disabled = true;
+  els.download.disabled = true;
   buildViewList();
   buildPhaseList();
   markPhase(0, 'active');
@@ -571,3 +575,34 @@ for (const ev of ['pointerup', 'pointercancel']) {
   });
 }
 els.canvas.addEventListener('dblclick', resetPan);
+
+
+// --- Download the map on screen --------------------------------------------
+
+/// `28070_ancient-map.png` — the seed first, so files from one world sort
+/// together, then which map it is.
+function downloadName() {
+  const seed = Math.max(0, Number(els.seed.value) | 0);
+  const slug = viewName(els.view.value)
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-|-$/g, '');
+  return `${seed}_${slug}.png`;
+}
+
+els.download.addEventListener('click', () => {
+  const canvas = is3D(els.view.value) ? els.canvas3d : els.canvas;
+  canvas.toBlob((blob) => {
+    if (!blob) {
+      setStatus('Could not read the canvas back.', true);
+      return;
+    }
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = downloadName();
+    a.click();
+    URL.revokeObjectURL(url);
+    setStatus(`Saved ${a.download}.`);
+  }, 'image/png');
+});
