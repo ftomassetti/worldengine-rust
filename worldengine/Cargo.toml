@@ -6,7 +6,7 @@ license = "MIT"
 description = "World generator simulating plate tectonics, erosion and biomes — a Rust port of worldengine"
 
 [dependencies]
-platec = { path = "../../plate-tectonics-rust/platec" }
+platec = { git = "https://github.com/ftomassetti/plate-tectonics-rust", rev = "f34a71da2e834f70b5b7951cb310536fdbbf59f7" }
 png = { version = "0.17", optional = true }
 
 [dev-dependencies]
