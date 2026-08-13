@@ -182,6 +182,106 @@ fn draw_a_mountain(target: &mut RgbaImage, x: i64, y: i64, w: f64, h: i64) {
     }
 }
 
+/// How far from shore the coastal shading reaches, in pixels.
+const COAST_REACH: u8 = 14;
+
+/// Distances at which a crisp line is drawn, the engraver's concentric shore
+/// lines.
+const COAST_RINGS: [u8; 3] = [3, 7, 12];
+
+/// Value noise from a hashed lattice, smoothly interpolated. Used for the
+/// parchment mottling, which wants to be blotchy rather than per-pixel.
+fn parchment(x: f64, y: f64) -> f64 {
+    fn hash(ix: i64, iy: i64) -> f64 {
+        let mut h = (ix as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
+            ^ (iy as u64).wrapping_mul(0xC2B2_AE3D_27D4_EB4F);
+        h ^= h >> 29;
+        h = h.wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        h ^= h >> 32;
+        (h >> 11) as f64 / (1u64 << 53) as f64
+    }
+    let (x0, y0) = (x.floor(), y.floor());
+    let (tx, ty) = (x - x0, y - y0);
+    // Smoothstep, so the lattice does not show as a grid.
+    let (sx, sy) = (tx * tx * (3.0 - 2.0 * tx), ty * ty * (3.0 - 2.0 * ty));
+    let (ix, iy) = (x0 as i64, y0 as i64);
+    let top = hash(ix, iy) * (1.0 - sx) + hash(ix + 1, iy) * sx;
+    let bot = hash(ix, iy + 1) * (1.0 - sx) + hash(ix + 1, iy + 1) * sx;
+    top * (1.0 - sy) + bot * sy
+}
+
+/// Emphasise the coastlines and break up the flat sea.
+///
+/// Two things a drawn map has and a filled polygon does not: the shore reads as
+/// a shore, because the water darkens towards it and carries concentric lines
+/// away from it; and the sea is not one flat colour, because the parchment
+/// underneath is uneven.
+fn engrave_sea(target: &mut RgbaImage, ocean: &Matrix<bool>, sw: usize, sh: usize) {
+    // Chebyshev distance from land, over sea cells, capped at COAST_REACH. A
+    // breadth-first walk outward from the shore only visits the water near it,
+    // which is a small part of the map.
+    let mut dist = vec![u8::MAX; sw * sh];
+    let mut queue = std::collections::VecDeque::new();
+    for y in 0..sh {
+        for x in 0..sw {
+            if !ocean[(y, x)] {
+                dist[y * sw + x] = 0;
+                queue.push_back((x, y));
+            }
+        }
+    }
+    while let Some((x, y)) = queue.pop_front() {
+        let d = dist[y * sw + x];
+        if d >= COAST_REACH {
+            continue;
+        }
+        for dy in -1i64..=1 {
+            for dx in -1i64..=1 {
+                let nx = x as i64 + dx;
+                let ny = y as i64 + dy;
+                if nx < 0 || ny < 0 || nx >= sw as i64 || ny >= sh as i64 {
+                    continue;
+                }
+                let (nx, ny) = (nx as usize, ny as usize);
+                if !ocean[(ny, nx)] || dist[ny * sw + nx] != u8::MAX {
+                    continue;
+                }
+                dist[ny * sw + nx] = d + 1;
+                queue.push_back((nx, ny));
+            }
+        }
+    }
+
+    for y in 0..sh {
+        for x in 0..sw {
+            if !ocean[(y, x)] {
+                continue;
+            }
+            let px = target.get(y, x);
+            let d = dist[y * sw + x];
+
+            // Mottling everywhere, so the open sea is not a flat fill. Two
+            // octaves: broad blotches with a finer grain over them.
+            let mottle = parchment(x as f64 / 90.0, y as f64 / 90.0) * 0.75
+                + parchment(x as f64 / 23.0, y as f64 / 23.0) * 0.25;
+            let mut shade = (mottle - 0.5) * 0.10;
+
+            // Water darkens towards the shore, and a few crisp lines run
+            // parallel to it.
+            if d <= COAST_REACH {
+                let t = 1.0 - f64::from(d) / f64::from(COAST_REACH);
+                shade -= 0.30 * t * t;
+                if COAST_RINGS.contains(&d) {
+                    shade -= 0.14;
+                }
+            }
+
+            let f = |v: u8| ((v as f64) * (1.0 + shade)).clamp(0.0, 255.0) as u8;
+            target.set_pixel(x, y, [f(px[0]), f(px[1]), f(px[2]), px[3]]);
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Masks
 // ---------------------------------------------------------------------------
@@ -294,6 +394,15 @@ fn zero_box(mask: &mut Matrix<f64>, y: i64, x: i64, r: i64) {
 // The ancient map
 // ---------------------------------------------------------------------------
 
+/// Cartographic dressing drawn on top of the base rendering.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AncientStyle {
+    /// Exactly what the original draws, and what the blessed images pin.
+    Plain,
+    /// Emphasised coastlines and a mottled parchment sea.
+    Engraved,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct AncientMapOptions {
     pub resize_factor: usize,
@@ -302,6 +411,7 @@ pub struct AncientMapOptions {
     pub draw_rivers: bool,
     pub draw_mountains: bool,
     pub draw_outer_land_border: bool,
+    pub style: AncientStyle,
 }
 
 impl Default for AncientMapOptions {
@@ -313,6 +423,8 @@ impl Default for AncientMapOptions {
             draw_rivers: true,
             draw_mountains: true,
             draw_outer_land_border: false,
+            // Plain by default: the blessed images pin the base rendering.
+            style: AncientStyle::Plain,
         }
     }
 }
@@ -435,6 +547,10 @@ pub fn draw_ancientmap(world: &World, target: &mut RgbaImage, opts: AncientMapOp
                 ],
             );
         }
+    }
+
+    if opts.style == AncientStyle::Engraved {
+        engrave_sea(target, &scaled_ocean, sw, sh);
     }
 
     if opts.draw_biome {

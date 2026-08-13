@@ -5,7 +5,7 @@
 //! stepped one iteration at a time, and each subsequent simulation is a
 //! separate `next_phase()` call.
 
-use worldengine::draw::ancient::{draw_ancientmap, AncientMapOptions};
+use worldengine::draw::ancient::{draw_ancientmap, AncientMapOptions, AncientStyle};
 use worldengine::draw::image::RgbaImage;
 use worldengine::draw::maps;
 use worldengine::generation::{
@@ -464,7 +464,17 @@ impl WorldGenerator {
                     }
                 }
             }
-            View::AncientMap => draw_ancientmap(w, &mut target, AncientMapOptions::default()),
+            View::AncientMap => draw_ancientmap(
+                w,
+                &mut target,
+                // The demo takes the dressed version; the library default stays
+                // as the original drew it, which is what the blessed images pin.
+                AncientMapOptions {
+                    style: AncientStyle::Engraved,
+                    draw_outer_land_border: true,
+                    ..AncientMapOptions::default()
+                },
+            ),
         }
 
         target.into_vec()
