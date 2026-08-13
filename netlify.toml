@@ -13,12 +13,17 @@
   publish = "www"
   command = """
     set -e
-    # The build image may already carry Rust; install only what is missing.
+    # The build image ships rustup but with no toolchain selected, so a bare
+    # `rustup target add` fails with "could not choose a version of rustup to
+    # run". Install rustup only if it is missing, then always name a toolchain.
     if ! command -v rustup >/dev/null 2>&1; then
-      curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+      curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+        | sh -s -- -y --profile minimal --default-toolchain stable
     fi
     [ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env" || true
     export PATH="$HOME/.cargo/bin:$PATH"
+    rustup toolchain install stable --profile minimal
+    rustup default stable
     rustup target add wasm32-unknown-unknown
     # `cargo install` rather than the wasm-pack installer script: it puts the
     # binary in $HOME/.cargo/bin, which the build user owns, where the script
