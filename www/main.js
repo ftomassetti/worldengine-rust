@@ -699,6 +699,8 @@ els.downloadAll.addEventListener('click', async () => {
   const scratch = document.createElement('canvas');
   const sctx = scratch.getContext('2d');
   const files = [];
+  let done = null;
+  let failed = false;
 
   try {
     for (const v of VIEWS) {
@@ -742,12 +744,15 @@ els.downloadAll.addEventListener('click', async () => {
     a.download = `${seed}_maps.zip`;
     a.click();
     URL.revokeObjectURL(url);
-    setStatus(`Saved ${a.download} with ${files.length} maps.`);
+    done = `Saved ${a.download}: ${files.length} maps, ${(blob.size / 1048576).toFixed(1)} MB.`;
   } catch (e) {
-    setStatus(`Could not build the archive: ${e.message ?? e}`, true);
+    done = `Could not build the archive: ${e.message ?? e}`;
+    failed = true;
   } finally {
     els.downloadAll.disabled = false;
-    // Put the view the user was on back on screen.
+    // Put back the view that was on screen, then report — restoring it sets a
+    // status of its own, which would otherwise bury the result.
     requestView(pinnedView);
+    if (done) setStatus(done, failed);
   }
 });

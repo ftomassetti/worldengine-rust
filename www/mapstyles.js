@@ -262,9 +262,20 @@ export function findPeaks(elev, ocean, w, h, { radius = 4, minRise = 0.18, seaLe
 }
 
 /// Cells of the given biome groups, thinned to a scatter.
-export function sampleWoods(groups, woodIds, w, h, { step = 4, keep = 0.4 }) {
-  const out = [];
+export function sampleWoods(groups, woodIds, w, h, { keep = 0.4, cap = 170 }) {
   const set = new Set(woodIds);
+
+  // The step follows the map, not the grid: a fixed step of 4 cells is a dense
+  // scatter on a 600-wide map and 8.4M candidates on a 4096-wide one, and
+  // capping that keeps only the top-left corner of the world.
+  let candidates = 0;
+  for (let i = 0; i < groups.length; i++) if (set.has(groups[i])) candidates++;
+  if (candidates === 0) return [];
+  // Aim for roughly `cap / keep` samples so the jitter thins them to the cap.
+  const target = Math.max(1, cap / keep);
+  const step = Math.max(1, Math.round(Math.sqrt(candidates / target)));
+
+  const out = [];
   for (let y = 0; y < h; y += step) {
     for (let x = 0; x < w; x += step) {
       const i = y * w + x;
@@ -274,6 +285,20 @@ export function sampleWoods(groups, woodIds, w, h, { step = 4, keep = 0.4 }) {
     }
   }
   return out;
+}
+
+/// Thin a list to `cap` entries, keeping them at least `minDist` apart.
+///
+/// Taking the first N of a list sorted by height puts every glyph in the one
+/// tallest range; spacing them shows the ranges the world actually has.
+function spaced(items, cap, minDist) {
+  const kept = [];
+  const d2 = minDist * minDist;
+  for (const it of items) {
+    if (kept.length >= cap) break;
+    if (kept.every((k) => (k.x - it.x) ** 2 + (k.y - it.y) ** 2 >= d2)) kept.push(it);
+  }
+  return kept;
 }
 
 // --- 2f. Fantasy chart ------------------------------------------------------
@@ -288,8 +313,18 @@ const F = {
   mountainFill: '#ece1c8',
 };
 
+/// A pronounceable name from the seed, so the sheet is titled rather than
+/// stamped with a generator argument.
+function worldTitle(seed) {
+  const first = ['Aer', 'Bel', 'Cor', 'Dun', 'El', 'Fen', 'Gal', 'Hal', 'Ith', 'Kor', 'Mar', 'Nor'];
+  const last = ['adia', 'anor', 'aria', 'endil', 'gard', 'heim', 'mara', 'nesse', 'ovia', 'thas'];
+  const n = Math.abs(Number(seed) | 0);
+  return first[n % first.length] + last[(n / first.length | 0) % last.length];
+}
+
 export function drawFantasyChart(ctx, world, cw, ch) {
   const { width: w, height: h, elevation, ocean, groups, river, seaLevel, groupNames } = world;
+  world.title = world.title ?? worldTitle(world.seed);
   const s = Math.min(cw / 600, ch / 480);
   const sx = cw / w;
   const sy = ch / h;
@@ -362,7 +397,7 @@ export function drawFantasyChart(ctx, world, cw, ch) {
     .map((n, i) => [n.toLowerCase(), i])
     .filter(([n]) => n.includes('forest') || n.includes('jungle'))
     .map(([, i]) => i);
-  const woods = sampleWoods(groups, woodIds, w, h, { step: 4, keep: 0.4 }).slice(0, 170);
+  const woods = spaced(sampleWoods(groups, woodIds, w, h, { keep: 0.4, cap: 170 }), 170, w / 90);
   ctx.save();
   ctx.lineWidth = 0.55 * s;
   ctx.strokeStyle = F.ink;
@@ -385,9 +420,13 @@ export function drawFantasyChart(ctx, world, cw, ch) {
   ctx.restore();
 
   // 4. Mountains, north to south so the overlaps stack downhill.
-  const peaks = findPeaks(elevation, ocean, w, h, { radius: 4, minRise: 0.18, seaLevel, span })
-    .slice(0, 55)
-    .sort((a, b) => a.y - b.y);
+  const allPeaks = findPeaks(elevation, ocean, w, h, {
+    radius: Math.max(4, Math.round(w / 150)),
+    minRise: 0.18,
+    seaLevel,
+    span,
+  });
+  const peaks = spaced(allPeaks, 55, w / 26).sort((a, b) => a.y - b.y);
   ctx.save();
   for (const p of peaks) {
     const alt = Math.min(1, (p.e - seaLevel) / span);
@@ -423,8 +462,12 @@ export function drawFantasyChart(ctx, world, cw, ch) {
       if (!ocean[y * w + x]) { lx += x; ly += y; landCount++; }
     }
   }
-  if (landCount > 0) {
-    haloText(ctx, (world.name ?? 'Terra').toUpperCase(), (lx / landCount) * sx, (ly / landCount) * sy, {
+  // Only label the landmass if its centroid actually falls on land — for a
+  // world split east and west the centroid lands in the middle of the ocean.
+  const cxg = Math.min(w - 1, Math.round(lx / Math.max(1, landCount)));
+  const cyg = Math.min(h - 1, Math.round(ly / Math.max(1, landCount)));
+  if (landCount > 0 && !ocean[cyg * w + cxg]) {
+    haloText(ctx, world.title.toUpperCase(), cxg * sx, cyg * sy, {
       font: serif(19), fill: F.ink, halo: F.paper, s, spacing: 6 * s,
     });
   }
@@ -447,7 +490,7 @@ export function drawFantasyChart(ctx, world, cw, ch) {
   ctx.strokeRect(cx0, cy0, cw0, ch0);
   ctx.lineWidth = 0.6 * s;
   ctx.strokeRect(cx0 + 4 * s, cy0 + 4 * s, cw0 - 8 * s, ch0 - 8 * s);
-  haloText(ctx, (world.name ?? 'Terra').toUpperCase(), cx0 + cw0 / 2, cy0 + ch0 * 0.38, {
+  haloText(ctx, world.title.toUpperCase(), cx0 + cw0 / 2, cy0 + ch0 * 0.38, {
     font: serif(18), fill: F.ink, halo: F.paper, s, spacing: 3 * s,
   });
   haloText(ctx, `seed ${world.seed}`, cx0 + cw0 / 2, cy0 + ch0 * 0.72, {
