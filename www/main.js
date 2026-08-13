@@ -4,7 +4,12 @@
 // rather than a rendered frame, and draws it on the main thread.
 
 import { createTerrainView3D } from './view3d.js';
-import { drawFantasyChart, drawTopographic, worldTitle } from './mapstyles.js';
+import {
+  drawFantasyChart,
+  drawNauticalChart,
+  drawTopographic,
+  worldTitle,
+} from './mapstyles.js';
 import { zipStore } from './zip.js';
 
 const $ = (id) => document.getElementById(id);
@@ -40,6 +45,7 @@ const PHASES = [
 /// Drawn styles, rendered here from the world data rather than in the wasm.
 const VIEWS_STYLED = [
   ['topographic', 'Topographic chart'],
+  ['nautical', 'Nautical chart'],
   ['fantasy', 'Fantasy chart'],
 ];
 
@@ -389,6 +395,7 @@ function drawStyled() {
   const seed = Math.max(0, Number(els.seed.value) | 0);
   const data = { ...chartData, seed, title: worldTitle(seed) };
   if (els.view.value === 'topographic') drawTopographic(c, data, cw, ch);
+  else if (els.view.value === 'nautical') drawNauticalChart(c, data, cw, ch);
   else drawFantasyChart(c, data, cw, ch);
   setStatus(`Showing ${viewName(els.view.value)}.`);
 }
@@ -733,6 +740,7 @@ els.downloadAll.addEventListener('click', async () => {
         sctx.clearRect(0, 0, scratch.width, scratch.height);
         const data = { ...chartData, seed, title: worldTitle(seed) };
         if (key === 'topographic') drawTopographic(sctx, data, scratch.width, scratch.height);
+        else if (key === 'nautical') drawNauticalChart(sctx, data, scratch.width, scratch.height);
         else drawFantasyChart(sctx, data, scratch.width, scratch.height);
         files.push({ name: `${seed}_${slug(name)}.png`, data: await canvasToBytes(scratch) });
       }

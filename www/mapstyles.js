@@ -726,3 +726,171 @@ export function drawTopographic(ctx, world, cw, ch) {
   ctx.fillText(`0${' '.repeat(8)}${(cells / 2) | 0}${' '.repeat(7)}${cells} cells`, bx, by - 5 * s);
   ctx.restore();
 }
+
+
+// --- 1c. Age-of-sail nautical chart -----------------------------------------
+//
+// A chart cares about coasts and courses. The land is left almost empty; the
+// sea carries the rhumb networks a navigator would lay a bearing along.
+//
+// The reference places named ports around the coast. Those names are invented
+// geography, so this omits settlements entirely and labels only water and land
+// masses, both anchored to the data.
+
+const NAUTICAL = {
+  paper: '#f6efdf',
+  ink: '#4c3826',
+  red: '#9c3d2e',
+  land: '#efe7cd',
+  sepia: '#8c7351',
+};
+
+/// Centres of the open water, one per quadrant, biggest first.
+///
+/// The rhumb networks radiate from these. Deep water only — a node on a shelf
+/// would put the rose half on a coastline.
+export function seaSpots(elevation, ocean, w, h, seaLevel) {
+  let emin = Infinity;
+  for (let i = 0; i < elevation.length; i++) if (elevation[i] < emin) emin = elevation[i];
+  const deepEnough = seaLevel - (seaLevel - emin) * 0.05;
+
+  const count = [0, 0, 0, 0];
+  const sx = [0, 0, 0, 0];
+  const sy = [0, 0, 0, 0];
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const i = y * w + x;
+      if (!ocean[i] || elevation[i] >= deepEnough) continue;
+      const q = (x < w / 2 ? 0 : 1) + (y < h / 2 ? 0 : 2);
+      count[q]++;
+      sx[q] += x;
+      sy[q] += y;
+    }
+  }
+  const min = (w * h) / 400;
+  return [0, 1, 2, 3]
+    .filter((q) => count[q] > min)
+    .sort((a, b) => count[b] - count[a])
+    .map((q) => ({ x: sx[q] / count[q], y: sy[q] / count[q], area: count[q] }));
+}
+
+/// Sea names from the seed. Toponyms, not political geography.
+function seaName(seed, k) {
+  const adj = ['Pale', 'Sundered', 'Amber', 'Iron', 'Quiet', 'Wandering', 'Cold', 'Glass'];
+  const kind = ['Sea', 'Deep', 'Reach', 'Waters', 'Expanse'];
+  const n = Math.abs((Number(seed) | 0) + k * 7919);
+  return `The ${adj[n % adj.length]} ${kind[(n / adj.length | 0) % kind.length]}`;
+}
+
+/// 32 rays at 11.25 degrees, the eight winds drawn heavier.
+function rhumbs(ctx, cx, cy, len, s) {
+  for (let i = 0; i < 32; i++) {
+    const a = (i * 2 * Math.PI) / 32;
+    const wind = i % 4 === 0; // 8 of the 32 rays
+    ctx.beginPath();
+    ctx.moveTo(cx, cy);
+    ctx.lineTo(cx + Math.cos(a) * len, cy + Math.sin(a) * len);
+    ctx.strokeStyle = wind ? NAUTICAL.ink : NAUTICAL.sepia;
+    ctx.lineWidth = (wind ? 0.7 : 0.4) * s;
+    ctx.globalAlpha = wind ? 0.45 : 0.28;
+    ctx.stroke();
+  }
+  ctx.globalAlpha = 1;
+}
+
+export function drawNauticalChart(ctx, world, cw, ch) {
+  const { width: w, height: h, elevation, ocean, seaLevel } = world;
+  const s = Math.min(cw / 600, ch / 480);
+  const sx = cw / w;
+  const sy = ch / h;
+
+  ctx.fillStyle = NAUTICAL.paper;
+  ctx.fillRect(0, 0, cw, ch);
+
+  // Everything but the frame is clipped inside it.
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(14 * s, 14 * s, cw - 28 * s, ch - 28 * s);
+  ctx.clip();
+
+  const spots = seaSpots(elevation, ocean, w, h, seaLevel).slice(0, 3);
+  const nodes = spots.length
+    ? spots.map((p) => ({ x: p.x * sx, y: p.y * sy }))
+    : [{ x: cw / 2, y: ch / 2 }];
+  const reach = Math.hypot(cw, ch) * 1.2;
+  ctx.save();
+  for (const n of nodes) rhumbs(ctx, n.x, n.y, reach, s);
+  ctx.restore();
+
+  const coast = contour((x, y) => !ocean[y * w + x], w, h);
+  coastalVignette(ctx, coast, sx, sy, NAUTICAL.ink, s);
+
+  // Land, painted per cell so islands and lakes need no nesting rules.
+  const land = ctx.createImageData(cw, ch);
+  const ld = land.data;
+  const rgb = [239, 231, 205];
+  for (let py = 0; py < ch; py++) {
+    const gy = Math.min(h - 1, (py / sy) | 0);
+    for (let px = 0; px < cw; px++) {
+      const gx = Math.min(w - 1, (px / sx) | 0);
+      if (ocean[gy * w + gx]) continue;
+      const o = (py * cw + px) * 4;
+      ld[o] = rgb[0]; ld[o + 1] = rgb[1]; ld[o + 2] = rgb[2]; ld[o + 3] = 255;
+    }
+  }
+  const tmp = document.createElement('canvas');
+  tmp.width = cw;
+  tmp.height = ch;
+  tmp.getContext('2d').putImageData(land, 0, 0);
+  ctx.drawImage(tmp, 0, 0);
+
+  ctx.save();
+  ctx.strokeStyle = NAUTICAL.ink;
+  ctx.lineWidth = 1.4 * s;
+  ctx.lineJoin = 'round';
+  tracePath(ctx, coast, sx, sy);
+  ctx.stroke();
+  ctx.restore();
+
+  // Sea names, one per open-water centre.
+  const serif = (px, style = '') =>
+    `${style} ${Math.round(px * s)}px Georgia, 'Times New Roman', serif`.trim();
+  spots.forEach((p, k) => {
+    haloText(ctx, seaName(world.seed, k), p.x * sx, p.y * sy + (k === 0 ? 46 * s : 0), {
+      font: serif(k === 0 ? 15 : 12, 'italic'),
+      fill: NAUTICAL.ink,
+      halo: NAUTICAL.paper,
+      s,
+      spacing: 3 * s,
+    });
+  });
+
+  // The landmass, in the manner of a region name.
+  let lc = 0, lx = 0, ly = 0;
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) if (!ocean[y * w + x]) { lx += x; ly += y; lc++; }
+  }
+  const cxg = Math.min(w - 1, Math.round(lx / Math.max(1, lc)));
+  const cyg = Math.min(h - 1, Math.round(ly / Math.max(1, lc)));
+  if (lc > 0 && !ocean[cyg * w + cxg]) {
+    haloText(ctx, world.title.toUpperCase(), cxg * sx, cyg * sy, {
+      font: serif(18), fill: '#5a4630', halo: NAUTICAL.land, s, spacing: 6 * s,
+    });
+  }
+
+  compassRose(ctx, nodes[0].x, nodes[0].y, 34 * s, {
+    ink: NAUTICAL.ink, red: NAUTICAL.red, paper: NAUTICAL.paper, s,
+  });
+  ctx.restore(); // frame clip
+
+  ctx.save();
+  ctx.strokeStyle = NAUTICAL.ink;
+  ctx.lineWidth = 2 * s;
+  ctx.strokeRect(10 * s, 10 * s, cw - 20 * s, ch - 20 * s);
+  ctx.lineWidth = 0.7 * s;
+  ctx.strokeRect(15 * s, 15 * s, cw - 30 * s, ch - 30 * s);
+  ctx.restore();
+
+  paperGrain(ctx, cw, ch, 0.09);
+  edgeVignette(ctx, cw, ch, 0.2);
+}
