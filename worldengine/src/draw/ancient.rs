@@ -2,11 +2,11 @@
 //! map, and the river overlay shared with the river map.
 
 use crate::biome::BiomeGroup;
-use crate::common::{anti_alias, count_neighbours};
+use crate::common::{anti_alias, IntegralMask};
 use crate::draw::ancient_patterns::{DESERT_PATTERN, FOREST_PATTERN1, FOREST_PATTERN2};
 use crate::draw::image::RgbaImage;
 use crate::matrix::Matrix;
-use crate::numpy::{rint, NumpyRng};
+use crate::numpy::NumpyRng;
 use crate::world::World;
 
 const LAND_COLOR: [u8; 4] = [181, 166, 127, 255];
@@ -207,10 +207,16 @@ fn find_mountains_mask(world: &World, factor: usize) -> Matrix<f64> {
 
     // Fast but not 100% precise; subsequent steps are fiendishly sensitive to
     // the precision errors, hence the rounding to 6 decimals.
-    let counted = count_neighbours(&mask, 3);
-    for i in 0..mask.len() {
-        if mask.as_slice()[i] > 0.0 {
-            mask.as_mut_slice()[i] = round_to(counted.as_slice()[i], 6);
+    //
+    // The mask is zeros and ones, so the neighbour count is an integer and the
+    // rounding to 6 decimals recovers it exactly; a summed-area table gives the
+    // same integer without convolving the map.
+    let integral = IntegralMask::new(width, height, |y, x| mask[(y, x)] > 0.0);
+    for y in 0..height {
+        for x in 0..width {
+            if mask[(y, x)] > 0.0 {
+                mask[(y, x)] = integral.neighbours(3, y, x);
+            }
         }
     }
 
@@ -222,12 +228,6 @@ fn find_mountains_mask(world: &World, factor: usize) -> Matrix<f64> {
     }
 
     mask.repeat(factor)
-}
-
-/// `numpy.around(value, decimals)` — scale, round half-to-even, scale back.
-fn round_to(value: f64, decimals: i32) -> f64 {
-    let scale = 10f64.powi(decimals);
-    rint(value * scale) / scale
 }
 
 fn build_biome_group_masks(world: &World, factor: usize) -> Vec<(BiomeGroup, Matrix<f64>)> {
@@ -245,10 +245,13 @@ fn build_biome_group_masks(world: &World, factor: usize) -> Vec<(BiomeGroup, Mat
             }
         }
 
-        let counted = count_neighbours(&group_mask, 1);
-        for i in 0..group_mask.len() {
-            if group_mask.as_slice()[i] > 0.0 {
-                group_mask.as_mut_slice()[i] = counted.as_slice()[i];
+        // Thirteen groups, each previously convolving the whole map twice.
+        let integral = IntegralMask::new(width, height, |y, x| group_mask[(y, x)] > 0.0);
+        for y in 0..height {
+            for x in 0..width {
+                if group_mask[(y, x)] > 0.0 {
+                    group_mask[(y, x)] = integral.neighbours(1, y, x);
+                }
             }
         }
         for v in group_mask.as_mut_slice() {
@@ -323,41 +326,31 @@ pub fn draw_ancientmap(world: &World, target: &mut RgbaImage, opts: AncientMapOp
 
     let scaled_ocean = world.ocean_data().repeat(factor);
 
-    let scaled_ocean_f = scaled_ocean.map(|&o| if o { 1.0 } else { 0.0 });
-    let ocean_neighbours = count_neighbours(&scaled_ocean_f, 1);
+    let ocean_integral = IntegralMask::new(sw, sh, |y, x| scaled_ocean[(y, x)]);
     let mut borders = Matrix::<bool>::new(sw, sh);
-    for i in 0..borders.len() {
-        borders.as_mut_slice()[i] =
-            ocean_neighbours.as_slice()[i] > 0.0 && !scaled_ocean.as_slice()[i];
-    }
-    let borders_f = borders.map(|&b| if b { 1.0 } else { 0.0 });
-
-    // Cache the neighbour counts at the radii that are needed.
-    let mut border_neighbours: Vec<(i64, Matrix<f64>)> = Vec::new();
-    for r in [6i64, 9] {
-        let counted = count_neighbours(&borders_f, r as usize).map(|&v| rint(v));
-        border_neighbours.push((r, counted));
-    }
-    let neighbours_at = |cache: &mut Vec<(i64, Matrix<f64>)>, r: i64| -> usize {
-        if let Some(i) = cache.iter().position(|(k, _)| *k == r) {
-            return i;
+    for y in 0..sh {
+        for x in 0..sw {
+            borders[(y, x)] = ocean_integral.neighbours(1, y, x) > 0.0 && !scaled_ocean[(y, x)];
         }
-        let counted = count_neighbours(&borders_f, r as usize).map(|&v| rint(v));
-        cache.push((r, counted));
-        cache.len() - 1
-    };
+    }
+
+    // One table answers every radius, rather than a whole-map convolution per
+    // radius — and the radii are not known ahead of time, since the mountain
+    // pass picks one per peak.
+    let border_integral = IntegralMask::new(sw, sh, |y, x| borders[(y, x)]);
 
     let mut outer_borders: Option<Matrix<bool>> = None;
     if opts.draw_outer_land_border {
         let mut inner_borders = borders.clone();
         for _ in 0..2 {
-            let inner_f = inner_borders.map(|&b| if b { 1.0 } else { 0.0 });
-            let counted = count_neighbours(&inner_f, 1);
+            let inner = IntegralMask::new(sw, sh, |y, x| inner_borders[(y, x)]);
             let mut ob = Matrix::<bool>::new(sw, sh);
-            for i in 0..ob.len() {
-                ob.as_mut_slice()[i] = counted.as_slice()[i] > 0.0
-                    && !inner_borders.as_slice()[i]
-                    && scaled_ocean.as_slice()[i];
+            for y in 0..sh {
+                for x in 0..sw {
+                    ob[(y, x)] = inner.neighbours(1, y, x) > 0.0
+                        && !inner_borders[(y, x)]
+                        && scaled_ocean[(y, x)];
+                }
             }
             inner_borders = ob.clone();
             outer_borders = Some(ob);
@@ -490,19 +483,13 @@ pub fn draw_ancientmap(world: &World, target: &mut RgbaImage, opts: AncientMapOp
 
         for (group, func, r, alt_func) in plan {
             let idx = masks.iter().position(|(g, _)| *g == group).unwrap();
-            let nb_idx = if r == 0 {
-                usize::MAX
-            } else {
-                neighbours_at(&mut border_neighbours, r)
-            };
 
             for y in 0..sh {
                 for x in 0..sw {
                     if masks[idx].1[(y, x)] <= 0.0 {
                         continue;
                     }
-                    let allowed =
-                        r == 0 || border_neighbours[nb_idx].1[(y, x)] <= 2.0;
+                    let allowed = r == 0 || border_integral.neighbours(r as usize, y, x) <= 2.0;
                     if !allowed {
                         continue;
                     }
@@ -530,8 +517,7 @@ pub fn draw_ancientmap(world: &World, target: &mut RgbaImage, opts: AncientMapOp
                 let h = 3 + world.level_of_mountain((x / factor, y / factor)) as i64;
                 let r = ((w / 3.0 * 2.0) as i64).max(h);
 
-                let idx = neighbours_at(&mut border_neighbours, r);
-                if border_neighbours[idx].1[(y, x)] <= 2.0 {
+                if border_integral.neighbours(r as usize, y, x) <= 2.0 {
                     draw_a_mountain(target, x as i64, y as i64, w, h);
                     zero_box(mask, y as i64, x as i64, r);
                 }
