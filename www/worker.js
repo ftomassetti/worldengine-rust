@@ -130,6 +130,18 @@ onmessage = async (event) => {
       case 'cancel':
         cancelled = true;
         break;
+      case 'elevation': {
+        // f32 rather than f64: it is what the GPU wants and half the bytes to
+        // copy across the worker boundary.
+        const data = generator.elevationF32();
+        postMessage(
+          { type: 'elevation', data, seaLevel: generator.seaLevel(),
+            width: generator.width(), height: generator.height() },
+          [data.buffer],
+        );
+        break;
+      }
+
       case 'render': {
         if (!generator || !generator.canRender(msg.view)) {
           postMessage({ type: 'unavailable', view: msg.view });

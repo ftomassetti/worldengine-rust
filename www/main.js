@@ -1,12 +1,16 @@
 // Main-thread UI for the worldengine demo. All generation happens in
 // worker.js; this file only collects parameters and paints the frames it
-// sends back.
+// sends back. The exception is the 3D view, which needs the elevation itself
+// rather than a rendered frame, and draws it on the main thread.
+
+import { createTerrainView3D } from './view3d.js';
 
 const $ = (id) => document.getElementById(id);
 
 const els = {
   seed: $('seed'), width: $('width'), height: $('height'), numPlates: $('numPlates'),
   plateExpansion: $('plateExpansion'), plateSizeHint: $('plateSizeHint'),
+  canvas3d: $('canvas3d'), controls3d: $('controls3d'), exag: $('exag'),
   oceanLevel: $('oceanLevel'), gammaCurve: $('gammaCurve'), curveOffset: $('curveOffset'),
   fadeBorders: $('fadeBorders'), temps: $('temps'), humids: $('humids'),
   generate: $('generate'), randomSeed: $('randomSeed'),
@@ -91,6 +95,10 @@ function buildViewList() {
     opt.textContent = v.name;
     els.view.appendChild(opt);
   }
+  const opt3d = document.createElement('option');
+  opt3d.value = '3d';
+  opt3d.textContent = 'Terrain (3D)';
+  els.view.appendChild(opt3d);
   els.view.value = '7'; // Satellite, once it is available.
 }
 
@@ -186,7 +194,7 @@ function startWorker() {
         renderBiomeCounts(msg.biomeCounts);
         setStatus(`World complete in ${(totalMs / 1000).toFixed(1)} s. Pick a view to explore it.`);
         // Show the view the selector is on.
-        requestView(Number(els.view.value));
+        requestView(els.view.value === '3d' ? '3d' : Number(els.view.value));
         break;
 
       case 'saved': {
@@ -228,6 +236,11 @@ function startWorker() {
         break;
       }
 
+      case 'elevation':
+        lastElevation = msg;
+        drawView3D();
+        break;
+
       case 'render':
         paint(msg);
         setStatus(`Showing ${VIEWS.find((v) => v.id === msg.view)?.name ?? 'map'}.`);
@@ -256,7 +269,70 @@ function startWorker() {
 }
 
 function requestView(view) {
+  if (view === '3d') {
+    show3D(true);
+    // The elevation is fetched once per generated world and cached.
+    if (lastElevation) drawView3D();
+    else worker.postMessage({ type: 'elevation' });
+    return;
+  }
+  show3D(false);
   worker.postMessage({ type: 'render', view });
+}
+
+// --- 3D terrain view --------------------------------------------------------
+
+let view3d = null;
+let view3dFailed = false;
+let lastElevation = null;
+
+/// Same hypsometric ramp the plate-tectonics demo uses, keyed off quantiles.
+const TERRAIN_STOPS_3D = [
+  { q: 0.15, from: [6, 32, 60], to: [10, 47, 82] },
+  { q: 0.70, from: [10, 47, 82], to: [29, 95, 138] },
+  { q: 0.75, from: [29, 95, 138], to: [134, 201, 208] },
+  { q: 0.90, from: [79, 122, 58], to: [143, 154, 78] },
+  { q: 0.95, from: [143, 154, 78], to: [169, 128, 63] },
+  { q: 0.99, from: [169, 128, 63], to: [107, 74, 51] },
+  { q: 1.00, from: [107, 74, 51], to: [236, 231, 226] },
+];
+
+function quantilesOf(values, qs) {
+  const sorted = Float32Array.from(values).sort();
+  return qs.map((q) => sorted[Math.min(sorted.length - 1, Math.floor(q * (sorted.length - 1)))]);
+}
+
+function show3D(on) {
+  els.canvas.hidden = on;
+  els.canvas3d.hidden = !on;
+  els.controls3d.hidden = !on;
+}
+
+function drawView3D() {
+  if (!lastElevation) return;
+  if (!view3d && !view3dFailed) {
+    try {
+      view3d = createTerrainView3D(els.canvas3d);
+      if (view3d) view3d.setRamp(TERRAIN_STOPS_3D);
+    } catch (e) {
+      console.error(e);
+      view3d = null;
+    }
+    if (!view3d) {
+      view3dFailed = true;
+      setStatus('This browser has no WebGL2, so the 3D view is unavailable.', true);
+      show3D(false);
+      return;
+    }
+  }
+  if (!view3d) return;
+
+  const { data, width, height, seaLevel } = lastElevation;
+  let min = Infinity;
+  for (const v of data) if (v < min) min = v;
+  const qs = quantilesOf(data, TERRAIN_STOPS_3D.map((s) => s.q));
+  view3d.draw(data, width, height, qs, min, seaLevel, Number(els.exag.value));
+  setStatus('Showing Terrain (3D). Drag to rotate, scroll to zoom.');
 }
 
 /// Grey out the views a loaded world has no layers for.
@@ -273,6 +349,7 @@ function markViewsAvailable(available) {
 
 function generate() {
   if (running) return;
+  lastElevation = null;
 
   let params;
   try {
@@ -339,7 +416,7 @@ els.randomSeed.addEventListener('click', () => {
   els.seed.value = Math.floor(Math.random() * 2 ** 31);
 });
 els.view.addEventListener('change', () => {
-  pinnedView = Number(els.view.value);
+  pinnedView = els.view.value === '3d' ? '3d' : Number(els.view.value);
   requestView(pinnedView);
 });
 
@@ -371,3 +448,11 @@ for (const el of [els.width, els.height, els.plateExpansion]) {
   el.addEventListener('input', updatePlateSizeHint);
 }
 updatePlateSizeHint();
+
+
+els.exag.addEventListener('input', () => {
+  if (view3d) view3d.setExaggeration(Number(els.exag.value));
+});
+window.addEventListener('resize', () => {
+  if (view3d && els.view.value === '3d') view3d.resize();
+});

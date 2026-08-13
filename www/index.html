@@ -145,6 +145,19 @@
   ul.biomes li { display: flex; justify-content: space-between; gap: 8px; color: var(--muted); }
   ul.biomes li .n { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   ul.biomes li .c { font-variant-numeric: tabular-nums; color: var(--text); }
+  canvas[hidden] { display: none; }
+  #controls3d[hidden] { display: none; }
+  #controls3d { display: inline-flex; gap: 12px; align-items: center; }
+  #controls3d input[type=range] { width: 110px; }
+  #canvas3d {
+    image-rendering: auto;
+    width: 100%;
+    max-width: 100%;
+    height: min(70vh, 560px);
+    cursor: grab;
+    touch-action: none;
+  }
+  #canvas3d:active { cursor: grabbing; }
 </style>
 </head>
 <body>
@@ -199,8 +212,15 @@
       <label>View
         <select id="view" disabled></select>
       </label>
+      <span id="controls3d" hidden>
+        <label>Relief
+          <input id="exag" type="range" min="0.005" max="0.12" step="0.005" value="0.01">
+        </label>
+        <span class="hint">drag to rotate · scroll to zoom</span>
+      </span>
     </div>
-    <div class="canvas-wrap"><canvas id="canvas" width="256" height="128"></canvas></div>
+    <div class="canvas-wrap"><canvas id="canvas" width="256" height="128"></canvas>
+      <canvas id="canvas3d" hidden></canvas></div>
     <div class="status" id="status">Loading WebAssembly module…</div>
   </div>
 

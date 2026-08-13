@@ -479,6 +479,28 @@ impl WorldGenerator {
             .unwrap_or_default()
     }
 
+    /// Elevation as `f32`, which is what a GPU wants and half the bytes to
+    /// copy out.
+    #[wasm_bindgen(js_name = elevationF32)]
+    pub fn elevation_f32(&self) -> Vec<f32> {
+        self.world
+            .elevation
+            .as_ref()
+            .map(|l| l.data.as_slice().iter().map(|&v| v as f32).collect())
+            .unwrap_or_default()
+    }
+
+    /// The elevation at which land meets sea, i.e. the "sea" threshold. Zero
+    /// before the thresholds are set.
+    #[wasm_bindgen(js_name = seaLevel)]
+    pub fn sea_level(&self) -> f64 {
+        self.world
+            .elevation
+            .as_ref()
+            .and_then(|l| l.thresholds.first().and_then(|t| t.1))
+            .unwrap_or(0.0)
+    }
+
     /// A tally of biome names and their cell counts, as `name\tcount` lines.
     #[wasm_bindgen(js_name = biomeCounts)]
     pub fn biome_counts(&self) -> String {
