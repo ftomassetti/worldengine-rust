@@ -205,13 +205,22 @@ export function createTerrainView3D(canvas) {
   const vao = gl.createVertexArray();
   const vbo = gl.createBuffer();
   const ibo = gl.createBuffer();
-  const texture = gl.createTexture();
+  let texture = null;
 
-  gl.bindTexture(gl.TEXTURE_2D, texture);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  /// `texStorage2D` allocates *immutable* storage, so a texture cannot be
+  /// resized: calling it a second time fails and leaves the old, smaller
+  /// allocation in place while the shader is told the new size, which samples
+  /// far outside the real data. Recreate the object instead.
+  function allocTexture(w, h) {
+    if (texture) gl.deleteTexture(texture);
+    texture = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, texture);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.texStorage2D(gl.TEXTURE_2D, 1, gl.R32F, w, h);
+  }
 
   gl.enable(gl.DEPTH_TEST);
   gl.enable(gl.CULL_FACE);
@@ -358,9 +367,14 @@ export function createTerrainView3D(canvas) {
       if (w !== texW || h !== texH) {
         texW = w;
         texH = h;
-        gl.bindTexture(gl.TEXTURE_2D, texture);
-        gl.texStorage2D(gl.TEXTURE_2D, 1, gl.R32F, w, h);
-        buildGrid(Math.min(w, MAX_GRID), Math.min(h, MAX_GRID));
+        allocTexture(w, h);
+        // Keep the mesh's aspect close to the world's, so a 2:1 map is not
+        // sampled twice as finely down its short axis as across its long one.
+        const longest = Math.max(w, h);
+        buildGrid(
+          Math.max(2, Math.min(w, Math.round((MAX_GRID * w) / longest))),
+          Math.max(2, Math.min(h, Math.round((MAX_GRID * h) / longest))),
+        );
       }
 
       gl.bindTexture(gl.TEXTURE_2D, texture);
