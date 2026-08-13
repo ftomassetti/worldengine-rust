@@ -1,0 +1,48 @@
+# Netlify build for the browser demo.
+#
+# Everything runs in the visitor's browser: the wasm module does the whole
+# simulation, so the site is static files and the hosting cost does not move
+# with traffic.
+#
+# The wasm bundle is built here rather than committed. Serving a stale bundle
+# is the failure this project has hit more than once — the page looks like it
+# works and silently runs old code — and building from source makes that
+# impossible.
+
+[build]
+  publish = "www"
+  command = """
+    set -e
+    if ! command -v rustup >/dev/null; then
+      curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+    fi
+    [ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env" || true
+    rustup target add wasm32-unknown-unknown
+    if ! command -v wasm-pack >/dev/null; then
+      curl -sSf https://rustwasm.github.io/wasm-pack/installer/init.sh | sh
+    fi
+    wasm-pack build worldengine-wasm --target web --out-dir ../www/pkg --release
+  """
+
+[build.environment]
+  # Rust builds are slow on a cold cache; keep the artefacts between deploys.
+  CARGO_TERM_COLOR = "always"
+
+# wasm must be served with its own type or the browser refuses to stream it.
+[[headers]]
+  for = "/pkg/*.wasm"
+  [headers.values]
+    Content-Type = "application/wasm"
+    Cache-Control = "public, max-age=31536000, immutable"
+
+# The page and its scripts change with every deploy, so they must not be held
+# in a cache the way the hashed wasm can be.
+[[headers]]
+  for = "/*.js"
+  [headers.values]
+    Cache-Control = "public, max-age=0, must-revalidate"
+
+[[headers]]
+  for = "/index.html"
+  [headers.values]
+    Cache-Control = "public, max-age=0, must-revalidate"
