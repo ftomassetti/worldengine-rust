@@ -894,3 +894,196 @@ export function drawNauticalChart(ctx, world, cw, ch) {
   paperGrain(ctx, cw, ch, 0.09);
   edgeVignette(ctx, cw, ch, 0.2);
 }
+
+
+// --- 1b (simplified). Engraved physical chart -------------------------------
+//
+// The 19th-century atlas style without its politics. The reference tints each
+// country and rules dashed borders between them; there are no countries here,
+// so the tints follow the biome groups instead — which keeps the hand-coloured
+// look, and colours something the world actually has.
+
+const ENGRAVED = {
+  paper: '#f4ecd9',
+  ink: '#5c4a32',
+  seaLine: '#c3b28d',
+  graticule: '#a08c67',
+  // The period tints, plus a neutral for anything unassigned.
+  tints: ['#e3bfb6', '#c9d4ac', '#e6d698', '#cfc0d4'],
+  neutral: '#ded1ae',
+};
+
+function hexToRgb(c) {
+  return [
+    parseInt(c.slice(1, 3), 16),
+    parseInt(c.slice(3, 5), 16),
+    parseInt(c.slice(5, 7), 16),
+  ];
+}
+
+export function drawEngravedChart(ctx, world, cw, ch) {
+  const { width: w, height: h, ocean, groups, groupNames } = world;
+  const s = Math.min(cw / 600, ch / 480);
+  const sx = cw / w;
+  const sy = ch / h;
+
+  ctx.fillStyle = ENGRAVED.paper;
+  ctx.fillRect(0, 0, cw, ch);
+
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(17 * s, 17 * s, cw - 34 * s, ch - 34 * s);
+  ctx.clip();
+
+  // Engraved sea: horizontal hairlines over everything, land painted on top.
+  ctx.strokeStyle = ENGRAVED.seaLine;
+  ctx.lineWidth = 0.55 * s;
+  ctx.beginPath();
+  for (let y = 1.7 * s; y < ch; y += 3.4 * s) {
+    ctx.moveTo(0, y);
+    ctx.lineTo(cw, y);
+  }
+  ctx.stroke();
+
+  // Graticule. The world is an equirectangular grid with no stated extent, so
+  // this is a regular ruling rather than degrees: twelve by six, the shape a
+  // two-degree graticule has over the reference's view.
+  ctx.save();
+  ctx.strokeStyle = ENGRAVED.graticule;
+  ctx.lineWidth = 0.5 * s;
+  ctx.globalAlpha = 0.6;
+  ctx.beginPath();
+  for (let i = 1; i < 12; i++) {
+    ctx.moveTo((cw * i) / 12, 0);
+    ctx.lineTo((cw * i) / 12, ch);
+  }
+  for (let i = 1; i < 6; i++) {
+    ctx.moveTo(0, (ch * i) / 6);
+    ctx.lineTo(cw, (ch * i) / 6);
+  }
+  ctx.stroke();
+  ctx.restore();
+
+  const coast = contour((x, y) => !ocean[y * w + x], w, h);
+  coastalVignette(ctx, coast, sx, sy, ENGRAVED.ink, s);
+
+  // Land, tinted by biome group at 75% over the paper.
+  //
+  // Tints cycle through the four period colours by group index, which is not a
+  // proper four-colouring — two groups that happen to neighbour can land on the
+  // same tint — but with thirteen groups over four colours it reads as varied.
+  const tintRgb = ENGRAVED.tints.map(hexToRgb);
+  const neutral = hexToRgb(ENGRAVED.neutral);
+  const paperRgb = hexToRgb(ENGRAVED.paper);
+  const blend = (c) => c.map((v, k) => Math.round(v * 0.75 + paperRgb[k] * 0.25));
+  const palette = tintRgb.map(blend);
+  const neutralBlend = blend(neutral);
+
+  const land = ctx.createImageData(cw, ch);
+  const ld = land.data;
+  for (let py = 0; py < ch; py++) {
+    const gy = Math.min(h - 1, (py / sy) | 0);
+    for (let px = 0; px < cw; px++) {
+      const gx = Math.min(w - 1, (px / sx) | 0);
+      const i = gy * w + gx;
+      if (ocean[i]) continue;
+      const g = groups[i];
+      const c = g === 255 ? neutralBlend : palette[g % palette.length];
+      const o = (py * cw + px) * 4;
+      ld[o] = c[0]; ld[o + 1] = c[1]; ld[o + 2] = c[2]; ld[o + 3] = 255;
+    }
+  }
+  const tmp = document.createElement('canvas');
+  tmp.width = cw;
+  tmp.height = ch;
+  tmp.getContext('2d').putImageData(land, 0, 0);
+  ctx.drawImage(tmp, 0, 0);
+
+  // Dashed rules between the tinted regions, where the reference rules borders.
+  // Only the larger groups, since a contour pass over the whole map per group
+  // is the expensive part of this style.
+  const counts = new Map();
+  for (let i = 0; i < groups.length; i++) {
+    if (ocean[i] || groups[i] === 255) continue;
+    counts.set(groups[i], (counts.get(groups[i]) ?? 0) + 1);
+  }
+  const big = [...counts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 6).map(([g]) => g);
+  ctx.save();
+  ctx.strokeStyle = ENGRAVED.ink;
+  ctx.lineWidth = 0.7 * s;
+  ctx.setLineDash([3 * s, 1.5 * s]);
+  for (const g of big) {
+    const lines = contour((x, y) => !ocean[y * w + x] && groups[y * w + x] === g, w, h);
+    tracePath(ctx, lines, sx, sy);
+    ctx.stroke();
+  }
+  ctx.restore();
+
+  ctx.save();
+  ctx.strokeStyle = ENGRAVED.ink;
+  ctx.lineWidth = 1 * s;
+  ctx.lineJoin = 'round';
+  tracePath(ctx, coast, sx, sy);
+  ctx.stroke();
+  ctx.restore();
+
+  // Labels: the landmass, and the open water.
+  const serif = (px, style = '') =>
+    `${style} ${Math.round(px * s)}px Georgia, 'Times New Roman', serif`.trim();
+  let lc = 0, lx = 0, ly = 0;
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) if (!ocean[y * w + x]) { lx += x; ly += y; lc++; }
+  }
+  const cxg = Math.min(w - 1, Math.round(lx / Math.max(1, lc)));
+  const cyg = Math.min(h - 1, Math.round(ly / Math.max(1, lc)));
+  if (lc > 0 && !ocean[cyg * w + cxg]) {
+    haloText(ctx, world.title.toUpperCase(), cxg * sx, cyg * sy, {
+      font: serif(19), fill: '#4a3a26', halo: ENGRAVED.paper, s, spacing: 5 * s,
+    });
+  }
+  seaSpots(world.elevation, ocean, w, h, world.seaLevel)
+    .slice(0, 3)
+    .forEach((p, k) => {
+      haloText(ctx, seaName(world.seed, k), p.x * sx, p.y * sy, {
+        font: serif(k === 0 ? 13 : 12, 'italic'),
+        fill: '#6d5a3e',
+        halo: ENGRAVED.paper,
+        s,
+        spacing: 2 * s,
+      });
+    });
+
+  ctx.restore(); // clip
+
+  // Degree frame: an alternating band between two rules.
+  const o = 12 * s;
+  const b = 5 * s;
+  const seg = 30 * s;
+  ctx.save();
+  ctx.lineWidth = 0.5 * s;
+  ctx.strokeStyle = ENGRAVED.ink;
+  let k = 0;
+  for (let x = o; x < cw - o; x += seg, k++) {
+    const width = Math.min(seg, cw - o - x);
+    ctx.fillStyle = k % 2 ? ENGRAVED.paper : ENGRAVED.ink;
+    for (const y of [o, ch - o - b]) {
+      ctx.fillRect(x, y, width, b);
+      ctx.strokeRect(x, y, width, b);
+    }
+  }
+  k = 0;
+  for (let y = o; y < ch - o; y += seg, k++) {
+    const height = Math.min(seg, ch - o - y);
+    ctx.fillStyle = k % 2 ? ENGRAVED.paper : ENGRAVED.ink;
+    for (const x of [o, cw - o - b]) {
+      ctx.fillRect(x, y, b, height);
+      ctx.strokeRect(x, y, b, height);
+    }
+  }
+  ctx.lineWidth = 1.6 * s;
+  ctx.strokeRect(o - 2 * s, o - 2 * s, cw - 2 * o + 4 * s, ch - 2 * o + 4 * s);
+  ctx.restore();
+
+  paperGrain(ctx, cw, ch, 0.1);
+  edgeVignette(ctx, cw, ch, 0.18);
+}

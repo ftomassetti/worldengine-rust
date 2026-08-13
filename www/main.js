@@ -5,6 +5,7 @@
 
 import { createTerrainView3D } from './view3d.js';
 import {
+  drawEngravedChart,
   drawFantasyChart,
   drawNauticalChart,
   drawTopographic,
@@ -45,6 +46,7 @@ const PHASES = [
 /// Drawn styles, rendered here from the world data rather than in the wasm.
 const VIEWS_STYLED = [
   ['topographic', 'Topographic chart'],
+  ['engraved', 'Engraved chart'],
   ['nautical', 'Nautical chart'],
   ['fantasy', 'Fantasy chart'],
 ];
@@ -352,11 +354,20 @@ function requestView(view) {
   // anything before it stops answering. The ancient map takes seconds at
   // 4096x2048 and looked like a hang.
   setStatus(`Rendering ${viewName(view)}\u2026`);
-  els.canvas.classList.add('busy');
+
+  // Dim the canvas only while something else is doing the work. The styled
+  // charts and the 3D view draw here and now, and leaving the class on left
+  // them showing through a dark veil.
+  els.canvas.classList.remove('busy');
+
   if (isStyled(view)) {
     show3D(false);
-    if (chartData) drawStyled();
-    else worker.postMessage({ type: 'chartData' });
+    if (chartData) {
+      drawStyled();
+    } else {
+      els.canvas.classList.add('busy');
+      worker.postMessage({ type: 'chartData' });
+    }
     return;
   }
   if (is3D(view)) {
@@ -367,6 +378,7 @@ function requestView(view) {
     return;
   }
   show3D(false);
+  els.canvas.classList.add('busy');
   worker.postMessage({ type: 'render', view });
 }
 
@@ -394,9 +406,14 @@ function drawStyled() {
   c.clearRect(0, 0, cw, ch);
   const seed = Math.max(0, Number(els.seed.value) | 0);
   const data = { ...chartData, seed, title: worldTitle(seed) };
-  if (els.view.value === 'topographic') drawTopographic(c, data, cw, ch);
-  else if (els.view.value === 'nautical') drawNauticalChart(c, data, cw, ch);
-  else drawFantasyChart(c, data, cw, ch);
+  const styled = {
+    topographic: drawTopographic,
+    engraved: drawEngravedChart,
+    nautical: drawNauticalChart,
+    fantasy: drawFantasyChart,
+  };
+  (styled[els.view.value] ?? drawFantasyChart)(c, data, cw, ch);
+  els.canvas.classList.remove('busy');
   setStatus(`Showing ${viewName(els.view.value)}.`);
 }
 
@@ -739,9 +756,13 @@ els.downloadAll.addEventListener('click', async () => {
         scratch.height = Math.round(scratch.width * aspect);
         sctx.clearRect(0, 0, scratch.width, scratch.height);
         const data = { ...chartData, seed, title: worldTitle(seed) };
-        if (key === 'topographic') drawTopographic(sctx, data, scratch.width, scratch.height);
-        else if (key === 'nautical') drawNauticalChart(sctx, data, scratch.width, scratch.height);
-        else drawFantasyChart(sctx, data, scratch.width, scratch.height);
+        const styled = {
+          topographic: drawTopographic,
+          engraved: drawEngravedChart,
+          nautical: drawNauticalChart,
+          fantasy: drawFantasyChart,
+        };
+        (styled[key] ?? drawFantasyChart)(sctx, data, scratch.width, scratch.height);
         files.push({ name: `${seed}_${slug(name)}.png`, data: await canvasToBytes(scratch) });
       }
     }
