@@ -5,10 +5,10 @@
 
 import { createTerrainView3D } from './view3d.js';
 import {
-  drawEngravedChart,
-  drawFantasyChart,
-  drawNauticalChart,
-  drawTopographic,
+  DEFAULT_HYPSO,
+  HYPSO_PALETTES,
+  STYLES,
+  drawStyle,
   worldTitle,
 } from './mapstyles.js';
 import { zipStore } from './zip.js';
@@ -25,6 +25,7 @@ const els = {
   generate: $('generate'), randomSeed: $('randomSeed'),
   save: $('save'), load: $('load'), loadInput: $('loadInput'),
   view: $('view'), canvas: $('canvas'), status: $('status'),
+  hypso: $('hypso'), controlsHypso: $('controlsHypso'),
   phases: $('phases'), biomes: $('biomes'),
   statPlateIter: $('statPlateIter'), statPlates: $('statPlates'),
   statOcean: $('statOcean'), statTotal: $('statTotal'),
@@ -44,12 +45,9 @@ const PHASES = [
 /// The 3D entries, as `[select value, label]`. `3d:<id>` drapes that 2D map
 /// over the relief; plain `3d` uses the height ramp.
 /// Drawn styles, rendered here from the world data rather than in the wasm.
-const VIEWS_STYLED = [
-  ['topographic', 'Topographic chart'],
-  ['engraved', 'Engraved chart'],
-  ['nautical', 'Nautical chart'],
-  ['fantasy', 'Fantasy chart'],
-];
+/// The names and draw functions live in mapstyles.js; this is just the pairs
+/// the view list needs.
+const VIEWS_STYLED = STYLES.map(([key, name]) => [key, name]);
 
 const isStyled = (v) => typeof v === 'string' && VIEWS_STYLED.some(([k]) => k === v);
 
@@ -134,6 +132,20 @@ function buildViewList() {
   }
   els.view.value = '7'; // Satellite, once it is available.
 }
+
+/// The hypsometric ramps, which only the topographic chart uses.
+function buildHypsoList() {
+  els.hypso.innerHTML = '';
+  for (const [key, pal] of Object.entries(HYPSO_PALETTES)) {
+    const opt = document.createElement('option');
+    opt.value = key;
+    opt.textContent = pal.name;
+    els.hypso.appendChild(opt);
+  }
+  els.hypso.value = DEFAULT_HYPSO;
+}
+
+const usesHypso = (v) => v === 'topographic';
 
 function paint(frame) {
   const { width, height, buffer } = frame;
@@ -359,6 +371,7 @@ function requestView(view) {
   // charts and the 3D view draw here and now, and leaving the class on left
   // them showing through a dark veil.
   els.canvas.classList.remove('busy');
+  els.controlsHypso.hidden = !usesHypso(view);
 
   if (isStyled(view)) {
     show3D(false);
@@ -405,14 +418,8 @@ function drawStyled() {
   const c = els.canvas.getContext('2d');
   c.clearRect(0, 0, cw, ch);
   const seed = Math.max(0, Number(els.seed.value) | 0);
-  const data = { ...chartData, seed, title: worldTitle(seed) };
-  const styled = {
-    topographic: drawTopographic,
-    engraved: drawEngravedChart,
-    nautical: drawNauticalChart,
-    fantasy: drawFantasyChart,
-  };
-  (styled[els.view.value] ?? drawFantasyChart)(c, data, cw, ch);
+  const data = { ...chartData, seed, title: worldTitle(seed), palette: els.hypso.value };
+  drawStyle(els.view.value, c, data, cw, ch);
   els.canvas.classList.remove('busy');
   setStatus(`Showing ${viewName(els.view.value)}.`);
 }
@@ -568,9 +575,13 @@ els.view.addEventListener('change', () => {
     is3D(els.view.value) || isStyled(els.view.value) ? els.view.value : Number(els.view.value);
   requestView(pinnedView);
 });
+els.hypso.addEventListener('change', () => {
+  if (usesHypso(els.view.value)) drawStyled();
+});
 
 buildPhaseList();
 buildViewList();
+buildHypsoList();
 startWorker();
 
 
@@ -755,14 +766,8 @@ els.downloadAll.addEventListener('click', async () => {
         scratch.width = Math.min(CHART_MAX_WIDTH, chartData.width);
         scratch.height = Math.round(scratch.width * aspect);
         sctx.clearRect(0, 0, scratch.width, scratch.height);
-        const data = { ...chartData, seed, title: worldTitle(seed) };
-        const styled = {
-          topographic: drawTopographic,
-          engraved: drawEngravedChart,
-          nautical: drawNauticalChart,
-          fantasy: drawFantasyChart,
-        };
-        (styled[key] ?? drawFantasyChart)(sctx, data, scratch.width, scratch.height);
+        const data = { ...chartData, seed, title: worldTitle(seed), palette: els.hypso.value };
+        drawStyle(key, sctx, data, scratch.width, scratch.height);
         files.push({ name: `${seed}_${slug(name)}.png`, data: await canvasToBytes(scratch) });
       }
     }

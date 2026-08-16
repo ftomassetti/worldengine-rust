@@ -585,17 +585,140 @@ function rampLut(stops) {
   return lut;
 }
 
-const HYPSO = rampLut([
-  [0, '#b0cd9c'], [0.06, '#a9c891'], [0.30, '#d3cf93'], [0.55, '#c2a578'],
-  [0.75, '#a98f78'], [0.90, '#cfc9c2'], [1, '#ffffff'],
-]);
-const SEA_RAMP = rampLut([[0, '#a6c9da'], [0.5, '#7ba7c2'], [1, '#517f9f']]);
+/// Hypsometric ramps, land and sea. The land ramp is the part that carries the
+/// house style of an atlas, so it is selectable rather than baked in.
+///
+/// Each is `[land stops, sea stops, ink]`, where `ink` is the contour and label
+/// colour that suits the tints.
+export const HYPSO_PALETTES = {
+  atlas: {
+    name: 'Atlas green-brown',
+    land: [[0, '#b0cd9c'], [0.06, '#a9c891'], [0.30, '#d3cf93'], [0.55, '#c2a578'],
+      [0.75, '#a98f78'], [0.90, '#cfc9c2'], [1, '#ffffff']],
+    sea: [[0, '#a6c9da'], [0.5, '#7ba7c2'], [1, '#517f9f']],
+    ink: [90, 70, 50],
+    coast: '#5d84a0',
+    river: '#38648a',
+    halo: '#eef2ec',
+  },
+  swiss: {
+    // Imhof's muted greys and buffs: less saturated than a school atlas, which
+    // is what lets the shaded relief rather than the tint carry the terrain.
+    name: 'Swiss relief',
+    land: [[0, '#cfd6c2'], [0.10, '#c9cdb2'], [0.35, '#c8bfa0'], [0.60, '#bfae95'],
+      [0.82, '#c4b7ae'], [1, '#f4f2ef']],
+    sea: [[0, '#c3d5dd'], [0.5, '#9db9c8'], [1, '#7191a6']],
+    ink: [70, 66, 58],
+    coast: '#6f8896',
+    river: '#4a7a93',
+    halo: '#f2f2ee',
+  },
+  arid: {
+    // The warm ramp used for dry country: no green at all, so low ground reads
+    // as desert rather than as pasture.
+    name: 'Arid ochre',
+    land: [[0, '#e6d9b2'], [0.20, '#dcc593'], [0.45, '#c9a273'], [0.70, '#ab7d5c'],
+      [0.88, '#8c6a55'], [1, '#efe6dc']],
+    sea: [[0, '#bcd0cf'], [0.5, '#8fb0b4'], [1, '#5f8590']],
+    ink: [96, 70, 44],
+    coast: '#7d8e83',
+    river: '#4d7a80',
+    halo: '#f6efdc',
+  },
+  bathy: {
+    // Ocean-first: the sea gets the wide ramp and the land is held back, the
+    // way a bathymetric sheet is drawn.
+    name: 'Bathymetric blue',
+    land: [[0, '#dfe3d8'], [0.35, '#d0d2c4'], [0.70, '#bcbcaf'], [1, '#f0f0ea']],
+    sea: [[0, '#d7ecf5'], [0.18, '#a9d6ea'], [0.40, '#78b8db'], [0.65, '#4a91c4'],
+      [0.85, '#2c6ba3'], [1, '#17457a']],
+    ink: [60, 78, 92],
+    coast: '#2f5f80',
+    river: '#2f6f97',
+    halo: '#eef4f6',
+  },
+};
+
+export const DEFAULT_HYPSO = 'atlas';
+
+/// Horn's method for the surface normal, evaluated over the 3x3 neighbourhood.
+///
+/// The previous shading here summed the centred differences along both axes,
+/// which is a directional derivative rather than a slope: a ridge running
+/// north-east cancels to zero and vanishes. Horn's gradient plus a real
+/// illumination angle is what makes the relief read as lit terrain, and it is
+/// the difference between the flat look and the shaded-relief look the good
+/// atlas maps have.
+///
+/// `zFactor` is in units of the land span per cell, so the same value suits a
+/// 512-wide world and a 4096-wide one.
+///
+/// The result is normalised so that flat ground is exactly 1.0, slopes facing
+/// the light are above it and slopes facing away below. Raw hillshade returns
+/// `cos(zenith)` on the flat — 0.78 for this light rig — so a caller that
+/// treated it as a 0..1 brightness would wash the whole sheet out.
+function hillshadeField(elevation, w, h, { zFactor, lights }) {
+  const at = (x, y) =>
+    elevation[Math.min(h - 1, Math.max(0, y)) * w + Math.min(w - 1, Math.max(0, x))];
+  const out = new Float32Array(w * h);
+
+  // Precompute each light's direction cosines.
+  const lit = lights.map(({ azimuth, altitude, weight }) => {
+    const zenith = ((90 - altitude) * Math.PI) / 180;
+    // Compass azimuth to the mathematical angle the aspect below is measured in.
+    const az = ((360 - azimuth + 90) * Math.PI) / 180;
+    return { cosZ: Math.cos(zenith), sinZ: Math.sin(zenith), az, weight };
+  });
+  const total = lit.reduce((a, l) => a + l.weight, 0) || 1;
+  // The response over flat ground, which the field is divided through by.
+  const flat = lit.reduce((a, l) => a + l.weight * l.cosZ, 0) / total || 1;
+
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const a = at(x - 1, y - 1), b = at(x, y - 1), c = at(x + 1, y - 1);
+      const d = at(x - 1, y), f = at(x + 1, y);
+      const g = at(x - 1, y + 1), i2 = at(x, y + 1), j = at(x + 1, y + 1);
+      const dzdx = ((c + 2 * f + j) - (a + 2 * d + g)) / 8;
+      const dzdy = ((g + 2 * i2 + j) - (a + 2 * b + c)) / 8;
+
+      const slope = Math.atan(zFactor * Math.hypot(dzdx, dzdy));
+      const aspect = Math.atan2(dzdy, -dzdx);
+
+      let v = 0;
+      for (const l of lit) {
+        v += l.weight *
+          (l.cosZ * Math.cos(slope) + l.sinZ * Math.sin(slope) * Math.cos(l.az - aspect));
+      }
+      out[y * w + x] = Math.max(0, v / total) / flat;
+    }
+  }
+  return out;
+}
+
+/// A north-west key light with three weaker fills.
+///
+/// A single light leaves every slope facing away from it in flat black, which
+/// on a busy world hides as much terrain as it shows. Spreading the fills round
+/// the compass — the multidirectional scheme relief shading uses — keeps those
+/// faces legible while the key light still says which way is up.
+const RELIEF_LIGHTS = [
+  { azimuth: 315, altitude: 45, weight: 0.55 },
+  { azimuth: 270, altitude: 60, weight: 0.20 },
+  { azimuth: 360, altitude: 60, weight: 0.15 },
+  { azimuth: 225, altitude: 60, weight: 0.10 },
+];
 
 export function drawTopographic(ctx, world, cw, ch) {
-  const { width: w, height: h, elevation, ocean, river, seaLevel, groups, groupNames } = world;
+  const { width: w, height: h, elevation, ocean, seaLevel, groups, groupNames } = world;
   const s = Math.min(cw / 600, ch / 480);
   const sx = cw / w;
   const sy = ch / h;
+
+  const pal = HYPSO_PALETTES[world.palette] ?? HYPSO_PALETTES[DEFAULT_HYPSO];
+  const LAND = rampLut(pal.land);
+  const SEA = rampLut(pal.sea);
+  const [ir, ig, ib] = pal.ink;
+  const ink = (alpha) => `rgba(${ir},${ig},${ib},${alpha})`;
 
   let emax = -Infinity, emin = Infinity;
   for (let i = 0; i < elevation.length; i++) {
@@ -604,6 +727,15 @@ export function drawTopographic(ctx, world, cw, ch) {
   }
   const span = Math.max(1e-6, emax - seaLevel);
   const deep = Math.max(1e-6, seaLevel - emin);
+
+  // Shading is computed on the land span, so worlds with a shallow relief get
+  // the same amount of modelling as dramatic ones. 90 is a vertical
+  // exaggeration: at 1 the gradients are far too gentle to read at map scale,
+  // which is true of real shaded relief too.
+  const shade = hillshadeField(elevation, w, h, {
+    zFactor: 90 / span,
+    lights: RELIEF_LIGHTS,
+  });
 
   // Base raster at grid resolution, then scaled up: the tints and the shading
   // are per cell, so there is nothing to gain from computing them per pixel.
@@ -614,7 +746,6 @@ export function drawTopographic(ctx, world, cw, ch) {
   const img = bctx.createImageData(w, h);
   const d = img.data;
 
-  const at = (x, y) => elevation[Math.min(h - 1, Math.max(0, y)) * w + Math.min(w - 1, Math.max(0, x))];
   for (let y = 0; y < h; y++) {
     for (let x = 0; x < w; x++) {
       const i = y * w + x;
@@ -622,31 +753,53 @@ export function drawTopographic(ctx, world, cw, ch) {
       d[o + 3] = 255;
       if (ocean[i]) {
         const t = Math.min(255, Math.max(0, ((seaLevel - elevation[i]) / deep) * 255)) | 0;
-        d[o] = SEA_RAMP[t * 3];
-        d[o + 1] = SEA_RAMP[t * 3 + 1];
-        d[o + 2] = SEA_RAMP[t * 3 + 2];
+        d[o] = SEA[t * 3];
+        d[o + 1] = SEA[t * 3 + 1];
+        d[o + 2] = SEA[t * 3 + 2];
         continue;
       }
-      // Light from the north-west: the slope along both axes darkens the cell.
-      const slope = (at(x + 1, y) - at(x - 1, y)) + (at(x, y + 1) - at(x, y - 1));
-      const shade = Math.min(1.4, Math.max(0.55, 1 - (slope / span) * 1.6));
+      // Flat ground is 1.0; the departure from it is gained up and clamped.
+      // Kept well off black: an atlas sheet shades, it does not silhouette.
+      const k = Math.min(1.22, Math.max(0.50, 1 + (shade[i] - 1) * 1.35));
       const t = Math.min(255, Math.max(0, ((elevation[i] - seaLevel) / span) * 255)) | 0;
-      d[o] = Math.min(255, HYPSO[t * 3] * shade);
-      d[o + 1] = Math.min(255, HYPSO[t * 3 + 1] * shade);
-      d[o + 2] = Math.min(255, HYPSO[t * 3 + 2] * shade);
+      d[o] = Math.min(255, LAND[t * 3] * k);
+      d[o + 1] = Math.min(255, LAND[t * 3 + 1] * k);
+      d[o + 2] = Math.min(255, LAND[t * 3 + 2] * k);
     }
   }
   bctx.putImageData(img, 0, 0);
   ctx.imageSmoothingEnabled = true;
   ctx.drawImage(base, 0, 0, cw, ch);
 
-  // Contours every ninth of the land range, above the shore.
+  // Contours. Twenty intervals over the land span, every fifth an index contour
+  // drawn heavier — the convention that lets a reader count up a slope without
+  // tracing every line back to the shore.
+  const INTERVALS = 20;
+  const INDEX_EVERY = 5;
   ctx.save();
-  ctx.strokeStyle = 'rgba(90,70,50,0.16)';
-  ctx.lineWidth = 0.6 * s;
-  for (let k = 1; k < 11; k++) {
-    const level = seaLevel + (0.08 + (k - 1) * 0.09) * span;
+  ctx.lineJoin = 'round';
+  for (let k = 1; k < INTERVALS; k++) {
+    const level = seaLevel + (k / INTERVALS) * span;
     if (level >= emax) break;
+    const index = k % INDEX_EVERY === 0;
+    ctx.strokeStyle = ink(index ? 0.34 : 0.15);
+    ctx.lineWidth = (index ? 1.0 : 0.55) * s;
+    const lines = contour((x, y) => elevation[y * w + x] >= level, w, h);
+    tracePath(ctx, lines, sx, sy);
+    ctx.stroke();
+  }
+  ctx.restore();
+
+  // Bathymetric contours, drawn the same way below the shore. Leaving the sea
+  // as a plain wash throws away half the elevation the world actually has.
+  const BATHY_INTERVALS = 8;
+  ctx.save();
+  ctx.lineJoin = 'round';
+  ctx.strokeStyle = 'rgba(30,60,86,0.22)';
+  for (let k = 1; k < BATHY_INTERVALS; k++) {
+    const level = seaLevel - (k / BATHY_INTERVALS) * deep;
+    if (level <= emin) break;
+    ctx.lineWidth = (k % 4 === 0 ? 0.9 : 0.5) * s;
     const lines = contour((x, y) => elevation[y * w + x] >= level, w, h);
     tracePath(ctx, lines, sx, sy);
     ctx.stroke();
@@ -656,7 +809,7 @@ export function drawTopographic(ctx, world, cw, ch) {
   // Coastline.
   const coast = contour((x, y) => !ocean[y * w + x], w, h);
   ctx.save();
-  ctx.strokeStyle = '#5d84a0';
+  ctx.strokeStyle = pal.coast;
   ctx.lineWidth = 1.1 * s;
   ctx.lineJoin = 'round';
   tracePath(ctx, coast, sx, sy);
@@ -664,12 +817,12 @@ export function drawTopographic(ctx, world, cw, ch) {
   ctx.restore();
 
   // Rivers.
-  drawRiverNetwork(ctx, world, sx, sy, { color: '#38648a', width: 1.5, s });
+  drawRiverNetwork(ctx, world, sx, sy, { color: pal.river, width: 1.5, s });
 
   // Labels: physical features only, anchored to the data.
   const sans = (px, style = '') =>
     `${style} ${Math.round(px * s)}px Helvetica, Arial, sans-serif`.trim();
-  const halo = '#eef2ec';
+  const halo = pal.halo;
 
   let lc = 0, lx = 0, ly = 0;
   for (let y = 0; y < h; y++) {
@@ -679,7 +832,7 @@ export function drawTopographic(ctx, world, cw, ch) {
   const cyg = Math.round(ly / Math.max(1, lc));
   if (lc > 0 && !ocean[Math.min(h - 1, cyg) * w + Math.min(w - 1, cxg)]) {
     haloText(ctx, world.title.toUpperCase(), cxg * sx, cyg * sy, {
-      font: sans(13, '600'), fill: '#6a6152', halo, s, spacing: 4 * s,
+      font: sans(13, '600'), fill: ink(0.85), halo, s, spacing: 4 * s,
     });
   }
 
@@ -688,7 +841,7 @@ export function drawTopographic(ctx, world, cw, ch) {
   });
   if (peaks.length) {
     haloText(ctx, `${world.title} Range`, peaks[0].x * sx, peaks[0].y * sy - 8 * s, {
-      font: sans(10, 'italic'), fill: '#7a6f5e', halo, s,
+      font: sans(10, 'italic'), fill: ink(0.72), halo, s,
     });
   }
 
@@ -1086,4 +1239,791 @@ export function drawEngravedChart(ctx, world, cw, ch) {
 
   paperGrain(ctx, cw, ch, 0.1);
   edgeVignette(ctx, cw, ch, 0.18);
+}
+
+
+// --- 5. Ink-wash chart ------------------------------------------------------
+//
+// The East-Asian painted-map tradition: a seigaiha wave field for the sea,
+// wash-and-outline mountains rather than the West's little triangles, labels on
+// vermilion plaques read top to bottom, and a seal in the corner.
+//
+// As with the other styles here nothing is invented: the plaques name the
+// landmass and the ranges the world actually has, not made-up towns.
+
+const INKWASH = {
+  paper: '#eee4cd',
+  ink: '#3c463f',
+  softInk: '#7d8880',
+  land: '#ece9d4',
+  highland: '#cfc6a4',
+  wave: '#8ba39f',
+  water: '#c2d3cd',
+  river: '#6d8a90',
+  vermilion: '#9d2f26',
+  seal: '#a8322a',
+};
+
+/// The seigaiha ("blue sea wave") fill: overlapping concentric arcs in offset
+/// rows, the standing pattern for water in Chinese and Japanese cartography.
+///
+/// Drawn into a tile and repeated, rather than arc by arc over the canvas —
+/// a 1800x900 sheet at this pitch is some 30,000 arcs, and `createPattern`
+/// draws it once.
+function seigaihaPattern(ctx, s) {
+  const r = 11 * s;
+  const tile = document.createElement('canvas');
+  // A half-drop repeat: the tile is one arc wide and one row tall, and the
+  // second row is drawn offset by half a step so the scales interlock.
+  tile.width = Math.max(2, Math.round(r * 2));
+  tile.height = Math.max(2, Math.round(r));
+  const t = tile.getContext('2d');
+
+  t.fillStyle = INKWASH.water;
+  t.fillRect(0, 0, tile.width, tile.height);
+  t.strokeStyle = INKWASH.wave;
+  t.lineWidth = Math.max(0.5, 0.8 * s);
+  t.globalAlpha = 0.75;
+
+  // Three nested arcs per scale, centred below the tile so only the crown
+  // shows, and repeated either side so the pattern joins across the seam.
+  for (const cx of [0, tile.width, tile.width / 2]) {
+    const cy = tile.height;
+    for (const k of [1, 0.68, 0.36]) {
+      t.beginPath();
+      t.arc(cx, cy, r * k, Math.PI, 0);
+      t.stroke();
+    }
+  }
+  return ctx.createPattern(tile, 'repeat');
+}
+
+/// A brush stroke: the path drawn several times with a small offset and
+/// falling opacity, which gives the loaded-then-drying edge a pen cannot.
+function brushStroke(ctx, lines, sx, sy, { color, width, s }) {
+  const passes = [[1.0, 0.30, 0], [0.62, 0.55, 0.35], [0.34, 0.9, -0.25]];
+  ctx.save();
+  ctx.strokeStyle = color;
+  ctx.lineJoin = 'round';
+  ctx.lineCap = 'round';
+  for (const [wk, alpha, off] of passes) {
+    ctx.globalAlpha = alpha;
+    ctx.lineWidth = width * wk * s;
+    ctx.save();
+    ctx.translate(off * s, off * s);
+    tracePath(ctx, lines, sx, sy);
+    ctx.stroke();
+    ctx.restore();
+  }
+  ctx.restore();
+}
+
+/// One painted massif: a run of steep humps, washed grey and outlined.
+///
+/// Chinese landscape mountains overlap in depth rather than standing in a row,
+/// so the rear ridges are drawn first, paler and higher, and the near ones
+/// painted over them.
+function inkMountain(ctx, px, py, scale, seedIdx) {
+  // The rear layers sit only slightly higher and wider than the near one, and
+  // are outlined faintly: a distant ridge is a wash with a suggestion of an
+  // edge, and drawing it at full strength turns the massif into a stack of
+  // separate outlined shapes instead of one receding form.
+  const layers = [
+    { dy: -2.6, k: 1.14, fill: 'rgba(126,138,130,0.26)', line: 'rgba(84,96,89,0.30)', lw: 0.7 },
+    { dy: -1.1, k: 1.04, fill: 'rgba(150,158,146,0.40)', line: 'rgba(70,82,75,0.52)', lw: 0.9 },
+    { dy: 0, k: 1.0, fill: 'rgba(196,199,178,0.72)', line: INKWASH.ink, lw: 1.15 },
+  ];
+
+  for (let li = 0; li < layers.length; li++) {
+    const { dy, k, fill, line, lw } = layers[li];
+    // Two or three humps per layer, the middle one tallest. They are much
+    // wider than they are tall: a painted massif is a shouldered mound, and
+    // peaks as tall as they are wide read as a row of fir trees instead.
+    const n = 2 + ((hash(seedIdx * 7 + li) * 2) | 0);
+    ctx.beginPath();
+    const wdt = 21 * scale * k;
+    const baseY = py + dy * scale;
+    ctx.moveTo(px - wdt / 2, baseY);
+    for (let p = 0; p < n; p++) {
+      const t0 = p / n;
+      const t1 = (p + 1) / n;
+      const mid = (t0 + t1) / 2;
+      // Centre humps are the tall ones; the flanks step down.
+      const fall = 1 - Math.abs(mid - 0.5) * 1.1;
+      const hgt = (6.5 + 8 * fall) * scale * k * (0.8 + hash(seedIdx * 13 + p + li * 5) * 0.45);
+      const x0 = px - wdt / 2 + wdt * t0;
+      const x1 = px - wdt / 2 + wdt * t1;
+      const apex = px - wdt / 2 + wdt * mid;
+      // Convex shoulders rolling into a rounded crown.
+      ctx.bezierCurveTo(
+        x0 + (apex - x0) * 0.42, baseY - hgt * 0.52,
+        apex - (apex - x0) * 0.46, baseY - hgt,
+        apex, baseY - hgt,
+      );
+      ctx.bezierCurveTo(
+        apex + (x1 - apex) * 0.46, baseY - hgt,
+        x1 - (x1 - apex) * 0.42, baseY - hgt * 0.52,
+        x1, baseY,
+      );
+    }
+    ctx.closePath();
+    ctx.fillStyle = fill;
+    ctx.fill();
+    ctx.strokeStyle = line;
+    ctx.lineWidth = lw * scale * 0.6;
+    ctx.lineJoin = 'round';
+    ctx.stroke();
+  }
+}
+
+/// A vermilion plaque with the name read downwards, the label form the painted
+/// maps use for places.
+function inkPlaque(ctx, text, x, y, s) {
+  const chars = [...text.toUpperCase()];
+  const fs = 7.5 * s;
+  const padX = 3.2 * s;
+  const padY = 3.4 * s;
+  const step = fs * 1.12;
+  const boxW = fs + padX * 2;
+  const boxH = step * chars.length + padY * 2;
+
+  ctx.save();
+  ctx.fillStyle = INKWASH.vermilion;
+  ctx.strokeStyle = 'rgba(60,30,24,0.55)';
+  ctx.lineWidth = 0.6 * s;
+  // A pennant: square head, notched foot.
+  ctx.beginPath();
+  ctx.moveTo(x - boxW / 2, y);
+  ctx.lineTo(x + boxW / 2, y);
+  ctx.lineTo(x + boxW / 2, y + boxH);
+  ctx.lineTo(x, y + boxH + 3 * s);
+  ctx.lineTo(x - boxW / 2, y + boxH);
+  ctx.closePath();
+  ctx.fill();
+  ctx.stroke();
+
+  ctx.fillStyle = '#f6ecd8';
+  ctx.font = `${Math.round(fs)}px Georgia, 'Times New Roman', serif`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  chars.forEach((c, i) => ctx.fillText(c, x, y + padY + step * (i + 0.5)));
+  ctx.restore();
+}
+
+/// The artist's seal: vermilion ground, reversed-out marks, set square.
+function inkSeal(ctx, x, y, size, seed, s) {
+  ctx.save();
+  ctx.fillStyle = INKWASH.seal;
+  ctx.globalAlpha = 0.88;
+  ctx.fillRect(x, y, size, size);
+  ctx.globalAlpha = 1;
+
+  // A 4x4 lattice of reversed-out blocks, chosen from the seed: an abstract
+  // stand-in for a carved seal rather than any real script.
+  const cell = size / 4.6;
+  const pad = (size - cell * 4) / 2;
+  ctx.fillStyle = INKWASH.paper;
+  for (let r = 0; r < 4; r++) {
+    for (let c = 0; c < 4; c++) {
+      if (hash((Number(seed) | 0) * 31 + r * 4 + c) > 0.52) continue;
+      ctx.fillRect(x + pad + c * cell + cell * 0.16, y + pad + r * cell + cell * 0.16,
+        cell * 0.68, cell * 0.68);
+    }
+  }
+  ctx.strokeStyle = INKWASH.seal;
+  ctx.lineWidth = 1.6 * s;
+  ctx.strokeRect(x + 0.8 * s, y + 0.8 * s, size - 1.6 * s, size - 1.6 * s);
+  ctx.restore();
+}
+
+export function drawInkWashChart(ctx, world, cw, ch) {
+  const { width: w, height: h, elevation, ocean, seaLevel, groups, groupNames } = world;
+  world.title = world.title ?? worldTitle(world.seed);
+  const s = Math.min(cw / 600, ch / 480);
+  const sx = cw / w;
+  const sy = ch / h;
+
+  let emax = -Infinity;
+  for (let i = 0; i < elevation.length; i++) if (elevation[i] > emax) emax = elevation[i];
+  const span = Math.max(1e-6, emax - seaLevel);
+
+  ctx.fillStyle = INKWASH.paper;
+  ctx.fillRect(0, 0, cw, ch);
+
+  // Everything but the border rules is inside the frame.
+  const inset = 15 * s;
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(inset, inset, cw - inset * 2, ch - inset * 2);
+  ctx.clip();
+
+  // 1. The wave field, over the whole sheet; the land is painted on top.
+  const waves = seigaihaPattern(ctx, s);
+  if (waves) {
+    ctx.save();
+    ctx.fillStyle = waves;
+    ctx.fillRect(0, 0, cw, ch);
+    ctx.restore();
+  } else {
+    ctx.fillStyle = INKWASH.water;
+    ctx.fillRect(0, 0, cw, ch);
+  }
+
+  // 2. Land wash. Two tones, so high ground reads warmer without shading it.
+  const land = ctx.createImageData(cw, ch);
+  const ld = land.data;
+  const lowRgb = hexToRgb(INKWASH.land);
+  const highRgb = hexToRgb(INKWASH.highland);
+  for (let py = 0; py < ch; py++) {
+    const gy = Math.min(h - 1, (py / sy) | 0);
+    for (let px = 0; px < cw; px++) {
+      const gx = Math.min(w - 1, (px / sx) | 0);
+      const i = gy * w + gx;
+      if (ocean[i]) continue;
+      const t = Math.min(1, Math.max(0, (elevation[i] - seaLevel) / span));
+      const o = (py * cw + px) * 4;
+      for (let k = 0; k < 3; k++) ld[o + k] = lowRgb[k] + (highRgb[k] - lowRgb[k]) * t;
+      ld[o + 3] = 255;
+    }
+  }
+  const tmp = document.createElement('canvas');
+  tmp.width = cw;
+  tmp.height = ch;
+  tmp.getContext('2d').putImageData(land, 0, 0);
+  ctx.drawImage(tmp, 0, 0);
+
+  // 3. Coast, drawn with the brush.
+  const coast = contour((x, y) => !ocean[y * w + x], w, h);
+  brushStroke(ctx, coast, sx, sy, { color: INKWASH.ink, width: 2.0, s });
+
+  // 4. Rivers.
+  drawRiverNetwork(ctx, world, sx, sy, { color: INKWASH.river, width: 1.2, s });
+
+  // 5. Woods: short brush dots in clusters, the painted convention for trees.
+  const woodIds = groupNames
+    .map((n, i) => [n.toLowerCase(), i])
+    .filter(([n]) => n.includes('forest') || n.includes('jungle'))
+    .map(([, i]) => i);
+  const woods = spaced(sampleWoods(groups, woodIds, w, h, { keep: 0.4, cap: 150 }), 150, w / 80);
+  ctx.save();
+  ctx.strokeStyle = 'rgba(74,90,74,0.7)';
+  ctx.lineCap = 'round';
+  for (const t of woods) {
+    const px = t.x * sx;
+    const py = t.y * sy;
+    for (let k = 0; k < 3; k++) {
+      const jx = (hash(t.x * 91 + t.y * 7 + k) - 0.5) * 6 * s;
+      const jy = (hash(t.x * 17 + t.y * 53 + k) - 0.5) * 4 * s;
+      ctx.lineWidth = (0.9 + hash(k + t.x) * 0.5) * s;
+      ctx.beginPath();
+      ctx.moveTo(px + jx, py + jy);
+      ctx.lineTo(px + jx, py + jy - (3.2 + hash(t.y + k) * 2) * s);
+      ctx.stroke();
+    }
+  }
+  ctx.restore();
+
+  // 6. Mountains, north to south so nearer ranges overlap the far ones.
+  const peaks = spaced(
+    findPeaks(elevation, ocean, w, h, {
+      radius: Math.max(4, Math.round(w / 130)), minRise: 0.16, seaLevel, span,
+    }),
+    60,
+    w / 24,
+  ).sort((a, b) => a.y - b.y);
+  peaks.forEach((p, i) => {
+    const alt = Math.min(1, (p.e - seaLevel) / span);
+    inkMountain(ctx, p.x * sx, p.y * sy, (0.75 + 0.9 * alt) * s, i);
+  });
+
+  // 7. Plaques: the landmass, and the tallest range. Both come from the data.
+  let lc = 0, lx = 0, ly = 0;
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) if (!ocean[y * w + x]) { lx += x; ly += y; lc++; }
+  }
+  const cxg = Math.min(w - 1, Math.round(lx / Math.max(1, lc)));
+  const cyg = Math.min(h - 1, Math.round(ly / Math.max(1, lc)));
+  if (lc > 0 && !ocean[cyg * w + cxg]) {
+    inkPlaque(ctx, world.title, cxg * sx, cyg * sy - 30 * s, s);
+  }
+  if (peaks.length) {
+    const tall = peaks.reduce((a, b) => (b.e > a.e ? b : a));
+    inkPlaque(ctx, 'SHAN', tall.x * sx + 26 * s, tall.y * sy - 14 * s, s);
+  }
+
+  ctx.restore(); // frame clip
+
+  // 8. Border: a heavy rule with a hairline inside it, and the seal.
+  ctx.save();
+  ctx.strokeStyle = INKWASH.vermilion;
+  ctx.lineWidth = 3 * s;
+  ctx.strokeRect(8 * s, 8 * s, cw - 16 * s, ch - 16 * s);
+  ctx.lineWidth = 0.7 * s;
+  ctx.strokeStyle = INKWASH.ink;
+  ctx.strokeRect(14 * s, 14 * s, cw - 28 * s, ch - 28 * s);
+  ctx.restore();
+
+  const sz = 30 * s;
+  inkSeal(ctx, cw - inset - sz - 6 * s, ch - inset - sz - 6 * s, sz, world.seed, s);
+
+  paperGrain(ctx, cw, ch, 0.13);
+  edgeVignette(ctx, cw, ch, 0.16);
+}
+
+
+// --- 6. Modern atlas --------------------------------------------------------
+//
+// The flat web-map look: pastel landcover, one flat blue for water, hairline
+// rivers, and grey sans-serif type. No paper, no grain, no vignette — the whole
+// point of the style is that it looks printed by a machine this morning.
+//
+// The relief is present but held right back, the way a terrain layer sits under
+// the landcover rather than over it.
+
+const ATLAS = {
+  water: '#aad3ea',
+  waterDeep: '#93c5e3',
+  coast: '#8fbcd9',
+  river: '#84bede',
+  graticule: '#d9d9d4',
+  type: '#5f6368',
+  typeWater: '#5b8caa',
+  halo: '#ffffff',
+  fallback: '#eae7e0',
+};
+
+/// Landcover tints, keyed off the biome group name rather than its index, so a
+/// change to the order of `BiomeGroup::ALL` cannot silently recolour the map.
+const ATLAS_COVER = [
+  [['jungle'], '#b8d6a4'],
+  [['forest'], '#c6dbb2'],
+  [['savanna', 'steppe'], '#e3e0c2'],
+  [['chaparral'], '#dfdcb8'],
+  [['hot desert'], '#efe2c3'],
+  [['cool desert'], '#e9e4cd'],
+  [['tundra', 'cold parklands'], '#dfe2da'],
+  [['iceland'], '#f4f6f7'],
+];
+
+function atlasCoverLut(groupNames) {
+  return groupNames.map((raw) => {
+    const n = raw.toLowerCase();
+    const hit = ATLAS_COVER.find(([keys]) => keys.some((k) => n.includes(k)));
+    return hexToRgb(hit ? hit[1] : ATLAS.fallback);
+  });
+}
+
+export function drawModernAtlas(ctx, world, cw, ch) {
+  const { width: w, height: h, elevation, ocean, seaLevel, groups, groupNames } = world;
+  world.title = world.title ?? worldTitle(world.seed);
+  const s = Math.min(cw / 600, ch / 480);
+  const sx = cw / w;
+  const sy = ch / h;
+
+  let emax = -Infinity, emin = Infinity;
+  for (let i = 0; i < elevation.length; i++) {
+    if (elevation[i] > emax) emax = elevation[i];
+    if (elevation[i] < emin) emin = elevation[i];
+  }
+  const span = Math.max(1e-6, emax - seaLevel);
+  const deep = Math.max(1e-6, seaLevel - emin);
+
+  // A gentle relief under the landcover: enough to see where the mountains are,
+  // not enough to fight the flat tints.
+  const shade = hillshadeField(elevation, w, h, {
+    zFactor: 60 / span,
+    lights: [{ azimuth: 315, altitude: 50, weight: 1 }],
+  });
+
+  const cover = atlasCoverLut(groupNames);
+  const fallback = hexToRgb(ATLAS.fallback);
+  const water = hexToRgb(ATLAS.water);
+  const waterDeep = hexToRgb(ATLAS.waterDeep);
+
+  const base = document.createElement('canvas');
+  base.width = w;
+  base.height = h;
+  const bctx = base.getContext('2d');
+  const img = bctx.createImageData(w, h);
+  const d = img.data;
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const i = y * w + x;
+      const o = i * 4;
+      d[o + 3] = 255;
+      if (ocean[i]) {
+        // Two shades only, and the shift is slight: a web map does not draw
+        // bathymetry, but a dead-flat sea reads as a hole in the sheet.
+        const t = Math.min(1, Math.max(0, (seaLevel - elevation[i]) / deep));
+        for (let k = 0; k < 3; k++) d[o + k] = water[k] + (waterDeep[k] - water[k]) * t;
+        continue;
+      }
+      const c = cover[groups[i]] ?? fallback;
+      // Held to a narrow band around 1, so the tint stays recognisably flat.
+      const k = Math.min(1.05, Math.max(0.88, 1 + (shade[i] - 1) * 0.45));
+      d[o] = Math.min(255, c[0] * k);
+      d[o + 1] = Math.min(255, c[1] * k);
+      d[o + 2] = Math.min(255, c[2] * k);
+    }
+  }
+  bctx.putImageData(img, 0, 0);
+  ctx.imageSmoothingEnabled = true;
+  ctx.drawImage(base, 0, 0, cw, ch);
+
+  // Graticule: pale, thin, under everything else that is drawn as line work.
+  ctx.save();
+  ctx.strokeStyle = ATLAS.graticule;
+  ctx.lineWidth = 0.6 * s;
+  ctx.globalAlpha = 0.8;
+  ctx.beginPath();
+  for (let i = 1; i < 12; i++) {
+    ctx.moveTo((cw * i) / 12, 0);
+    ctx.lineTo((cw * i) / 12, ch);
+  }
+  for (let i = 1; i < 6; i++) {
+    ctx.moveTo(0, (ch * i) / 6);
+    ctx.lineTo(cw, (ch * i) / 6);
+  }
+  ctx.stroke();
+  ctx.restore();
+
+  const coast = contour((x, y) => !ocean[y * w + x], w, h);
+  ctx.save();
+  ctx.strokeStyle = ATLAS.coast;
+  ctx.lineWidth = 0.9 * s;
+  ctx.lineJoin = 'round';
+  tracePath(ctx, coast, sx, sy);
+  ctx.stroke();
+  ctx.restore();
+
+  drawRiverNetwork(ctx, world, sx, sy, { color: ATLAS.river, width: 1.1, s });
+
+  // Type. A web map letterspaces its region names and sets water in italic.
+  const sans = (px, style = '') =>
+    `${style} ${Math.round(px * s)}px 'Helvetica Neue', Helvetica, Arial, sans-serif`.trim();
+
+  let lc = 0, lx = 0, ly = 0;
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) if (!ocean[y * w + x]) { lx += x; ly += y; lc++; }
+  }
+  const cxg = Math.min(w - 1, Math.round(lx / Math.max(1, lc)));
+  const cyg = Math.min(h - 1, Math.round(ly / Math.max(1, lc)));
+  if (lc > 0 && !ocean[cyg * w + cxg]) {
+    haloText(ctx, world.title.toUpperCase(), cxg * sx, cyg * sy, {
+      font: sans(15, '500'), fill: ATLAS.type, halo: ATLAS.halo, s, spacing: 5 * s,
+    });
+  }
+
+  seaSpots(elevation, ocean, w, h, seaLevel).slice(0, 3).forEach((p, k) => {
+    haloText(ctx, seaName(world.seed, k), p.x * sx, p.y * sy, {
+      font: sans(k === 0 ? 12 : 10.5, 'italic'),
+      fill: ATLAS.typeWater,
+      halo: ATLAS.halo,
+      s,
+      spacing: 2 * s,
+    });
+  });
+
+  // The biggest wood and the tallest range, the two physical labels a terrain
+  // layer carries.
+  const woodIds = groupNames
+    .map((n, i) => [n.toLowerCase(), i])
+    .filter(([n]) => n.includes('forest') || n.includes('jungle'))
+    .map(([, i]) => i);
+  const woodSet = new Set(woodIds);
+  let fc = 0, fx = 0, fy = 0;
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) if (woodSet.has(groups[y * w + x])) { fx += x; fy += y; fc++; }
+  }
+  if (fc > 0) {
+    haloText(ctx, 'Great Forest', (fx / fc) * sx, (fy / fc) * sy, {
+      font: sans(10), fill: '#4c7a43', halo: ATLAS.halo, s,
+    });
+  }
+
+  const peaks = findPeaks(elevation, ocean, w, h, {
+    radius: Math.max(4, Math.round(w / 150)), minRise: 0.18, seaLevel, span,
+  });
+  if (peaks.length) {
+    haloText(ctx, `${world.title} Range`, peaks[0].x * sx, peaks[0].y * sy - 9 * s, {
+      font: sans(10), fill: '#7a6a55', halo: ATLAS.halo, s,
+    });
+  }
+
+  // Scale bar and attribution, bottom right, in the web-map manner: a bar with
+  // an end tick and the units beside it.
+  const bar = 90 * s;
+  const bx = cw - bar - 16 * s;
+  const by = ch - 20 * s;
+  ctx.save();
+  ctx.strokeStyle = ATLAS.type;
+  ctx.lineWidth = 1.2 * s;
+  ctx.beginPath();
+  ctx.moveTo(bx, by - 4 * s);
+  ctx.lineTo(bx, by);
+  ctx.lineTo(bx + bar, by);
+  ctx.lineTo(bx + bar, by - 4 * s);
+  ctx.stroke();
+  ctx.font = sans(9);
+  ctx.fillStyle = ATLAS.type;
+  ctx.textAlign = 'right';
+  ctx.textBaseline = 'alphabetic';
+  ctx.fillText(`${Math.round(bar / sx)} cells`, bx + bar, by - 6 * s);
+  ctx.textAlign = 'left';
+  ctx.globalAlpha = 0.65;
+  ctx.fillText(`worldengine · seed ${world.seed}`, 14 * s, ch - 12 * s);
+  ctx.restore();
+}
+
+
+// --- 7. Retro print atlas ---------------------------------------------------
+//
+// A mid-century atlas plate, built the way one was actually printed: not as
+// flat fills but as four spot inks, each screened into a halftone at its own
+// angle and laid down slightly out of register.
+//
+// That is what carries the period. A retro palette on flat fills still looks
+// like a modern chart in old colours; the dot rosettes and the colour fringe
+// where the plates miss are the tell.
+
+const RETRO = {
+  paper: '#f1e7d0',
+  // The plates, in the order they are laid down. Angles are the classic
+  // screen set — keeping them 30 degrees apart is what stops the dots from
+  // forming a moire instead of a rosette.
+  inks: {
+    teal: { color: [58, 116, 116], angle: 15, offset: [0.6, -0.4] },
+    ochre: { color: [206, 154, 60], angle: 75, offset: [-0.5, 0.5] },
+    brick: { color: [172, 74, 52], angle: 0, offset: [0.4, 0.7] },
+  },
+  key: '#2f2b26',
+};
+
+/// Screen one ink plate into a halftone and composite it onto `ctx`.
+///
+/// `coverage(px, py)` returns the ink density wanted at that canvas point, 0 to
+/// 1. Each dot is drawn at the density sampled at its own centre, on a grid
+/// rotated to the plate's screen angle.
+function halftonePlate(ctx, cw, ch, coverage, { color, angle, offset }, s) {
+  const plate = document.createElement('canvas');
+  plate.width = cw;
+  plate.height = ch;
+  const p = plate.getContext('2d');
+  p.fillStyle = `rgb(${color[0]},${color[1]},${color[2]})`;
+
+  // Pitch in canvas pixels. Coarse enough that the dots are visible as dots —
+  // a fine screen just reads as a flat tint and loses the whole effect.
+  const pitch = 4.4 * s;
+  const rad = (angle * Math.PI) / 180;
+  const cos = Math.cos(rad);
+  const sin = Math.sin(rad);
+  // The rotated grid has to cover the corners of the canvas, so it is run over
+  // the diagonal in both axes and points outside are simply skipped.
+  const reach = Math.hypot(cw, ch) / 2 + pitch;
+  const cx = cw / 2;
+  const cy = ch / 2;
+  const steps = Math.ceil(reach / pitch);
+  const rmax = pitch * 0.62;
+
+  p.beginPath();
+  for (let j = -steps; j <= steps; j++) {
+    for (let i = -steps; i <= steps; i++) {
+      const u = i * pitch;
+      const v = j * pitch;
+      const px = cx + u * cos - v * sin;
+      const py = cy + u * sin + v * cos;
+      if (px < -pitch || py < -pitch || px > cw + pitch || py > ch + pitch) continue;
+      const t = coverage(px, py);
+      if (t <= 0.02) continue;
+      // Area, not radius, tracks density — a dot of twice the radius is four
+      // times the ink.
+      const r = rmax * Math.sqrt(Math.min(1, t));
+      p.moveTo(px + r, py);
+      p.arc(px, py, r, 0, Math.PI * 2);
+    }
+  }
+  p.fill();
+
+  ctx.save();
+  // Multiply, so overlapping plates build up the way wet ink does rather than
+  // the last one painting out the others.
+  ctx.globalCompositeOperation = 'multiply';
+  ctx.drawImage(plate, offset[0] * s, offset[1] * s);
+  ctx.restore();
+}
+
+export function drawRetroPrint(ctx, world, cw, ch) {
+  const { width: w, height: h, elevation, ocean, seaLevel, groups, groupNames } = world;
+  world.title = world.title ?? worldTitle(world.seed);
+  const s = Math.min(cw / 600, ch / 480);
+  const sx = cw / w;
+  const sy = ch / h;
+
+  let emax = -Infinity, emin = Infinity;
+  for (let i = 0; i < elevation.length; i++) {
+    if (elevation[i] > emax) emax = elevation[i];
+    if (elevation[i] < emin) emin = elevation[i];
+  }
+  const span = Math.max(1e-6, emax - seaLevel);
+  const deep = Math.max(1e-6, seaLevel - emin);
+
+  ctx.fillStyle = RETRO.paper;
+  ctx.fillRect(0, 0, cw, ch);
+
+  // Sampling helpers: the plates are screened in canvas space but every value
+  // they ask for lives on the world grid.
+  const cell = (px, py) =>
+    Math.min(h - 1, Math.max(0, (py / sy) | 0)) * w + Math.min(w - 1, Math.max(0, (px / sx) | 0));
+  const isSea = (px, py) => ocean[cell(px, py)] !== 0;
+  const height01 = (px, py) => Math.min(1, Math.max(0, (elevation[cell(px, py)] - seaLevel) / span));
+
+  const woodIds = new Set(
+    groupNames
+      .map((n, i) => [n.toLowerCase(), i])
+      .filter(([n]) => n.includes('forest') || n.includes('jungle'))
+      .map(([, i]) => i),
+  );
+
+  // Teal: the sea, deepening offshore — and a lighter lay over the woods,
+  // which is how the period got its forest green, by overprinting the blue
+  // plate on the yellow one rather than running a fourth ink.
+  halftonePlate(ctx, cw, ch, (px, py) => {
+    const i = cell(px, py);
+    if (!ocean[i]) return woodIds.has(groups[i]) ? 0.58 : 0;
+    const t = Math.min(1, Math.max(0, (seaLevel - elevation[i]) / deep));
+    return 0.32 + 0.62 * t;
+  }, RETRO.inks.teal, s);
+
+  // Ochre: a flat bed over all land. It is held back under the woods so the
+  // teal above reads as green there rather than as olive.
+  halftonePlate(ctx, cw, ch, (px, py) => {
+    const i = cell(px, py);
+    if (ocean[i]) return 0;
+    return woodIds.has(groups[i]) ? 0.34 : 0.62;
+  }, RETRO.inks.ochre, s);
+
+  // Brick: the high ground, so relief shows as a build-up of the third plate
+  // over the second — the layer-tint method a period atlas used. The first
+  // band starts low, since most of a world is lowland and a high threshold
+  // leaves the plate showing on a few summits only.
+  halftonePlate(ctx, cw, ch, (px, py) => {
+    if (isSea(px, py)) return 0;
+    const t = height01(px, py);
+    return t < 0.20 ? 0 : Math.min(1, 0.18 + (t - 0.20) / 0.55);
+  }, RETRO.inks.brick, s);
+
+  // The key plate: line work and type, in solid ink rather than screened.
+  const key = document.createElement('canvas');
+  key.width = cw;
+  key.height = ch;
+  const k = key.getContext('2d');
+
+  const coast = contour((x, y) => !ocean[y * w + x], w, h);
+  k.save();
+  k.strokeStyle = RETRO.key;
+  k.lineWidth = 1.5 * s;
+  k.lineJoin = 'round';
+  tracePath(k, coast, sx, sy);
+  k.stroke();
+  k.restore();
+
+  // Two layer-tint boundaries, ruled as fine lines the way the plate edges were.
+  k.save();
+  k.strokeStyle = RETRO.key;
+  k.globalAlpha = 0.45;
+  k.lineWidth = 0.6 * s;
+  for (const t of [0.20, 0.55]) {
+    const level = seaLevel + t * span;
+    if (level >= emax) break;
+    tracePath(k, contour((x, y) => elevation[y * w + x] >= level, w, h), sx, sy);
+    k.stroke();
+  }
+  k.restore();
+
+  drawRiverNetwork(k, world, sx, sy, { color: RETRO.key, width: 1.0, s });
+
+  ctx.save();
+  ctx.globalCompositeOperation = 'multiply';
+  // The key plate is out of register too, by less than the colours: it was the
+  // one the others were pulled to.
+  ctx.drawImage(key, -0.3 * s, 0.3 * s);
+  ctx.restore();
+
+  // Type: a condensed grotesque, letterspaced wide, as the period set its
+  // region names.
+  //
+  // Drawn here rather than onto the key plate, and so composited normally. A
+  // name over a full screen of dots needs its pale halo to stay legible, and
+  // multiply — which is right for ink on ink — drops light colours entirely,
+  // leaving the halo invisible and the type unreadable.
+  const grotesque = (px, style = '') =>
+    `${style} ${Math.round(px * s)}px 'Haettenschweiler', 'Arial Narrow', Impact, sans-serif`.trim();
+
+  let lc = 0, lx = 0, ly = 0;
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) if (!ocean[y * w + x]) { lx += x; ly += y; lc++; }
+  }
+  const cxg = Math.min(w - 1, Math.round(lx / Math.max(1, lc)));
+  const cyg = Math.min(h - 1, Math.round(ly / Math.max(1, lc)));
+  if (lc > 0 && !ocean[cyg * w + cxg]) {
+    haloText(ctx, world.title.toUpperCase(), cxg * sx, cyg * sy, {
+      font: grotesque(22), fill: RETRO.key, halo: 'rgba(241,231,208,0.8)', s, spacing: 8 * s,
+    });
+  }
+  seaSpots(elevation, ocean, w, h, seaLevel).slice(0, 2).forEach((p, i) => {
+    haloText(ctx, seaName(world.seed, i).toUpperCase(), p.x * sx, p.y * sy, {
+      font: grotesque(i === 0 ? 13 : 11),
+      fill: '#173a3a',
+      halo: 'rgba(241,231,208,0.92)',
+      s,
+      spacing: 4 * s,
+    });
+  });
+
+  // Plate frame and title bar, printed square with the sheet.
+  ctx.save();
+  ctx.strokeStyle = RETRO.key;
+  ctx.lineWidth = 2.4 * s;
+  ctx.strokeRect(11 * s, 11 * s, cw - 22 * s, ch - 22 * s);
+  ctx.lineWidth = 0.7 * s;
+  ctx.strokeRect(16 * s, 16 * s, cw - 32 * s, ch - 32 * s);
+
+  const barH = 26 * s;
+  ctx.fillStyle = RETRO.paper;
+  ctx.fillRect(16 * s, ch - 16 * s - barH, cw - 32 * s, barH);
+  ctx.strokeRect(16 * s, ch - 16 * s - barH, cw - 32 * s, barH);
+  ctx.fillStyle = RETRO.key;
+  ctx.font = grotesque(13);
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(`${world.title.toUpperCase()} — PHYSICAL`, 24 * s, ch - 16 * s - barH / 2);
+  ctx.font = `${Math.round(9 * s)}px 'Arial Narrow', Arial, sans-serif`;
+  ctx.textAlign = 'right';
+  ctx.fillText(`PLATE ${1 + ((Number(world.seed) | 0) % 48)} · SEED ${world.seed}`,
+    cw - 24 * s, ch - 16 * s - barH / 2);
+  ctx.restore();
+
+  paperGrain(ctx, cw, ch, 0.16);
+}
+
+
+// --- The style table --------------------------------------------------------
+//
+// One place that names every drawn style, so the view list, the redraw and the
+// archive cannot drift apart.
+
+export const STYLES = [
+  ['topographic', 'Topographic chart', drawTopographic],
+  ['engraved', 'Engraved chart', drawEngravedChart],
+  ['nautical', 'Nautical chart', drawNauticalChart],
+  ['fantasy', 'Fantasy chart', drawFantasyChart],
+  ['inkwash', 'Ink-wash chart', drawInkWashChart],
+  ['atlas', 'Modern atlas', drawModernAtlas],
+  ['retro', 'Retro print atlas', drawRetroPrint],
+];
+
+/// Draw a style by key, falling back to the fantasy chart for an unknown one.
+export function drawStyle(key, ctx, world, cw, ch) {
+  const hit = STYLES.find(([k]) => k === key);
+  (hit ? hit[2] : drawFantasyChart)(ctx, world, cw, ch);
 }
